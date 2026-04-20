@@ -1,0 +1,9 @@
+node_modules/
+panel/node_modules/
+panel/data/
+panel/data/*.json
+*.log
+.DS_Store
+*.swp
+.env
+.env.local

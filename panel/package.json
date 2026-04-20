@@ -1,0 +1,22 @@
+{
+  "name": "panel-naive-hy2",
+  "version": "1.0.0",
+  "description": "Panel Naive + Hysteria2 by RIXXX — управление NaiveProxy и Hysteria2 через веб-интерфейс",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "bcryptjs": "^2.4.3",
+    "ws": "^8.14.2",
+    "cors": "^2.8.5",
+    "body-parser": "^1.20.2",
+    "js-yaml": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
