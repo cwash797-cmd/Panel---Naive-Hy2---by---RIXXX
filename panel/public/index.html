@@ -595,11 +595,22 @@
 
       <div class="card diag-card">
         <div class="card-header">
-          <h3 class="card-title">Порты и сервисы</h3>
+          <h3 class="card-title">Порты, сервисы и TLS</h3>
         </div>
         <div class="card-body">
-          <p class="muted">Проверка кто слушает <code>:443</code> по TCP и UDP. Если на UDP/443 висит Caddy — Hy2 не сможет запуститься.</p>
+          <p class="muted">Проверка кто слушает <code>:443</code> по TCP и UDP + статус TLS-сертификата Hy2. Если на UDP/443 висит Caddy — Hy2 не сможет запуститься.</p>
           <pre class="log-box" id="diagPortsBox">Загружаю...</pre>
+        </div>
+      </div>
+
+      <div class="card diag-card">
+        <div class="card-header">
+          <h3 class="card-title">Активный конфиг <code>/etc/hysteria/config.yaml</code></h3>
+          <button class="btn btn-outline btn-sm" onclick="loadDiagHysteriaConfig()">Показать</button>
+        </div>
+        <div class="card-body">
+          <p class="muted">Пароли замаскированы как <code>***masked***</code>. Полезно когда Hy2 ведёт себя странно — сразу видно какой masquerade, какой TLS и все ли секции на месте.</p>
+          <pre class="log-box log-box-tall" id="diagHysteriaCfg">— нажмите «Показать» —</pre>
         </div>
       </div>
 
@@ -626,12 +637,20 @@
 
       <div class="card">
         <div class="card-body">
-          <h3 class="diag-help-title">Если Hy2 не запускается — частые причины:</h3>
+          <h3 class="diag-help-title">Если Hy2 запущен но клиент не может подключиться:</h3>
           <ul class="diag-help-list">
-            <li><strong>UDP/443 занят Caddy</strong> (HTTP/3). Решение: переустановите Hy2 или убедитесь что в <code>/etc/caddy/Caddyfile</code> в глобальном блоке <code>{}</code> есть <code>servers { protocols h1 h2 }</code>.</li>
-            <li><strong>Нет TLS-сертификата</strong>. Caddy выдаёт его при первом обращении — проверьте что A-запись домена указывает на этот сервер.</li>
-            <li><strong>Бинарник для другой архитектуры</strong> — посмотрите архитектуру в Дашборде.</li>
-            <li><strong>Файрволл</strong> блокирует UDP/443 — проверьте: <code>ufw status</code>.</li>
+            <li><strong>В логах <code>suppressing panic for copyResponse / H3_GENERAL_PROTOCOL_ERROR / timeout: no recent network activity</code></strong> — это ответы masquerade на запросы клиентов, которые НЕ прошли Hy2-авторизацию. Значит клиент подключается с неверным паролем или неверной ссылкой.</li>
+            <li><strong>Проверьте ссылку</strong>: формат <code>hysteria2://PASSWORD@DOMAIN:443?sni=DOMAIN#name</code>. Для userpass-auth пароль = <code>username:password</code>.</li>
+            <li><strong>Cert невалиден</strong> — клиент не принимает cert Caddy. В диагностике выше проверьте что cert-файл существует и доступен (<code>perms 644</code>).</li>
+            <li><strong>Файрволл провайдера</strong> блокирует UDP/443 на стороне клиента — попробуйте мобильный интернет или VPN через другой регион.</li>
+          </ul>
+
+          <h3 class="diag-help-title" style="margin-top:20px">Если Hy2 вообще не запускается:</h3>
+          <ul class="diag-help-list">
+            <li><strong>UDP/443 занят Caddy</strong> (HTTP/3). Решение: в <code>/etc/caddy/Caddyfile</code> в глобальном блоке <code>{}</code> должно быть <code>servers { protocols h1 h2 }</code>, потом <code>systemctl reload caddy &amp;&amp; systemctl restart hysteria-server</code>.</li>
+            <li><strong>Нет TLS-сертификата</strong>. Caddy выдаёт его при первом обращении — убедитесь что A-запись домена указывает на этот сервер и порт 80 доступен снаружи.</li>
+            <li><strong>Бинарник для другой архитектуры</strong> — посмотрите в Дашборде.</li>
+            <li><strong>UFW</strong> блокирует UDP/443 — выполните: <code>ufw allow 443/udp &amp;&amp; ufw reload</code>.</li>
           </ul>
         </div>
       </div>

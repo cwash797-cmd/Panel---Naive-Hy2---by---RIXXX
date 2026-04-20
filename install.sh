@@ -444,12 +444,13 @@ auth:
   userpass:
     default: "${HY2_PASS}"
 
-# Маскировка трафика (выглядит как обычный HTTPS-сайт)
+# Маскировка трафика: отдаёт ТУ ЖЕ страницу что Caddy на TCP.
+# type:file надёжнее чем proxy:bing.com — нет внешних зависимостей,
+# не будет ошибок H3_GENERAL_PROTOCOL_ERROR в логах.
 masquerade:
-  type: proxy
-  proxy:
-    url: https://www.bing.com
-    rewriteHost: true
+  type: file
+  file:
+    dir: /var/www/html
 
 # TLS
 HYCFGEOF
@@ -567,6 +568,9 @@ Documentation=https://v2.hysteria.network/
 ${HY_UNIT_AFTER}
 ${HY_UNIT_WANTS}
 Requires=network-online.target
+# StartLimit* должны быть в [Unit], иначе systemd выдаёт warning
+StartLimitIntervalSec=60s
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -579,8 +583,6 @@ LimitNPROC=512
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 RestartSec=10s
-StartLimitIntervalSec=60s
-StartLimitBurst=3
 StandardOutput=journal
 StandardError=journal
 
@@ -898,7 +900,9 @@ if [[ $INSTALL_NAIVE -eq 1 ]]; then
 fi
 
 if [[ $INSTALL_HY2 -eq 1 ]]; then
-  HY2_LINK="hysteria2://${HY2_PASS}@${PROXY_DOMAIN}:443?sni=${PROXY_DOMAIN}#RIXXX"
+  # ВАЖНО: при userpass-авторизации в URI auth = username:password
+  # (см. https://v2.hysteria.network/docs/developers/URI-Scheme/)
+  HY2_LINK="hysteria2://default:${HY2_PASS}@${PROXY_DOMAIN}:443?sni=${PROXY_DOMAIN}&insecure=0#RIXXX"
   echo -e "${PURPLE}${BOLD}║                                                               ║${RESET}"
   echo -e "${PURPLE}${BOLD}║   ⚡  Hysteria2                                               ║${RESET}"
   echo -e "${PURPLE}${BOLD}║   Домен:  ${PROXY_DOMAIN}                                     ║${RESET}"
