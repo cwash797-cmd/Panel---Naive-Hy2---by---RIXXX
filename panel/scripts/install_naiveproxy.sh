@@ -209,10 +209,6 @@ HTMLEOF
 {
   printf '{\n'
   printf '  order forward_proxy before file_server\n'
-  printf '  email %s\n' "$EMAIL"
-  # Жёстко фиксируем Let's Encrypt (иначе Caddy может выбрать ZeroSSL,
-  # и Hy2 не найдёт сертификат в ожидаемом пути).
-  printf '  acme_ca https://acme-v02.api.letsencrypt.org/directory\n'
   if [[ "$WITH_HY2" == "1" ]]; then
     printf '  servers {\n'
     printf '    protocols h1 h2\n'
@@ -248,10 +244,6 @@ systemctl stop caddy 2>/dev/null || true
 pkill -x caddy 2>/dev/null || true
 sleep 1
 
-# Фиксируем директории данных Caddy в /var/lib/caddy (нужно для Hy2)
-mkdir -p /var/lib/caddy/.local/share/caddy /var/lib/caddy/.config/caddy
-chmod -R 755 /var/lib/caddy 2>/dev/null || true
-
 cat > /etc/systemd/system/caddy.service << 'SERVICEEOF'
 [Unit]
 Description=Caddy with NaiveProxy (by RIXXX)
@@ -263,17 +255,13 @@ Requires=network-online.target
 Type=notify
 User=root
 Group=root
-# Принудительно фиксируем директории данных Caddy,
-# чтобы Hysteria2 мог читать сертификат по предсказуемому пути.
-Environment=HOME=/var/lib/caddy
-Environment=XDG_DATA_HOME=/var/lib/caddy/.local/share
-Environment=XDG_CONFIG_HOME=/var/lib/caddy/.config
 ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
 ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
 TimeoutStopSec=5s
 LimitNOFILE=1048576
 LimitNPROC=512
-# PrivateTmp/ProtectSystem убраны — мешают Caddy писать в /var/lib/caddy
+PrivateTmp=true
+ProtectSystem=full
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=always
 RestartSec=5s
