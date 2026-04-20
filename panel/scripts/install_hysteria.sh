@@ -126,13 +126,24 @@ auth:
   userpass:
     default: "${PASSWORD}"
 
+# Маскировка: отдаёт ту же статичную страницу что Caddy. Нет лишних
+# внешних запросов → нет ошибок H3_GENERAL_PROTOCOL_ERROR в логах.
 masquerade:
-  type: proxy
-  proxy:
-    url: https://www.bing.com
-    rewriteHost: true
+  type: file
+  file:
+    dir: /var/www/html
 
 HYCFGEOF
+
+# Убедимся что директория с HTML существует (на случай standalone Hy2 без Caddy)
+mkdir -p /var/www/html
+if [[ ! -f /var/www/html/index.html ]]; then
+  cat > /var/www/html/index.html << 'MASQEOF'
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Loading</title>
+<style>body{background:#080808;height:100vh;margin:0;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:sans-serif}.bar{width:200px;height:3px;background:#151515;overflow:hidden;border-radius:2px;margin-bottom:25px}.fill{height:100%;width:40%;background:#fff;animation:slide 1.4s infinite ease-in-out}@keyframes slide{0%{transform:translateX(-100%)}50%{transform:translateX(50%)}100%{transform:translateX(200%)}}.t{color:#555;font-size:13px;letter-spacing:3px;font-weight:600}</style>
+</head><body><div class="bar"><div class="fill"></div></div><div class="t">LOADING CONTENT</div></body></html>
+MASQEOF
+fi
 
 if [[ "$USE_CADDY_CERT" == "1" ]]; then
   # ── КРИТИЧНО: если Caddy уже запущен — он скорее всего слушает UDP/443
@@ -311,6 +322,9 @@ Documentation=https://v2.hysteria.network/
 ${HY_AFTER}
 ${HY_WANTS}
 Requires=network-online.target
+# StartLimit* должны быть в [Unit], а не в [Service] (systemd warning)
+StartLimitIntervalSec=60s
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -323,8 +337,6 @@ LimitNPROC=512
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 RestartSec=10s
-StartLimitIntervalSec=60s
-StartLimitBurst=3
 StandardOutput=journal
 StandardError=journal
 

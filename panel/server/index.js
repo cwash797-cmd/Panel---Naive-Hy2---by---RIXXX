@@ -387,7 +387,7 @@ function writeHysteriaConfig(cfg) {
     base = {
       listen: ':443',
       auth: { type: 'userpass', userpass },
-      masquerade: { type: 'proxy', proxy: { url: 'https://www.bing.com', rewriteHost: true } },
+      masquerade: { type: 'file', file: { dir: '/var/www/html' } },
       acme: { domains: [cfg.domain], email: cfg.email || 'admin@' + cfg.domain, ca: 'letsencrypt', listenHost: '0.0.0.0' },
       ignoreClientBandwidth: true,
       quic: {
@@ -439,7 +439,7 @@ app.post('/api/hy2/users', requireAuth, async (req, res) => {
   res.json({
     success: true,
     link: cfg.domain
-      ? `hysteria2://${encodeURIComponent(password)}@${cfg.domain}:443?sni=${cfg.domain}#${encodeURIComponent(username)}`
+      ? `hysteria2://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${cfg.domain}:443?sni=${cfg.domain}&insecure=0#${encodeURIComponent(username)}`
       : null
   });
 });
@@ -490,18 +490,59 @@ app.get('/api/logs/:kind', requireAuth, (req, res) => {
   p.on('error', () => res.json({ unit, output: 'journalctl недоступен' }));
 });
 
-// Диагностика портов: что слушает 443/tcp и 443/udp
+// Диагностика портов: что слушает 443/tcp и 443/udp + сертификаты
 app.get('/api/diag/ports', requireAuth, (req, res) => {
   const p = spawn('bash', ['-c',
-    'echo "=== TCP/443 ==="; (ss -tlnp 2>/dev/null | grep -E ":443 " || echo "(ничего)"); ' +
-    'echo "=== UDP/443 ==="; (ss -ulnp 2>/dev/null | grep -E ":443 " || echo "(ничего)"); ' +
-    'echo "=== Caddy ==="; systemctl is-active caddy 2>/dev/null || echo unknown; ' +
-    'echo "=== Hysteria ==="; systemctl is-active hysteria-server 2>/dev/null || echo unknown'
+    'echo "=== TCP/443 (Naive/Caddy) ==="; (ss -tlnp 2>/dev/null | grep -E ":443 " || echo "(никто не слушает)"); ' +
+    'echo ""; echo "=== UDP/443 (Hysteria2) ==="; (ss -ulnp 2>/dev/null | grep -E ":443 " || echo "(никто не слушает)"); ' +
+    'echo ""; echo "=== Статус сервисов ==="; ' +
+    'echo "caddy:            $(systemctl is-active caddy 2>/dev/null || echo unknown)"; ' +
+    'echo "hysteria-server:  $(systemctl is-active hysteria-server 2>/dev/null || echo unknown)"; ' +
+    'echo ""; echo "=== Hysteria TLS ==="; ' +
+    'if [ -f /etc/hysteria/config.yaml ]; then ' +
+    '  TLS_CERT=$(grep -E "^\\s*cert:" /etc/hysteria/config.yaml 2>/dev/null | head -1 | sed "s/.*cert:\\s*//" | tr -d " "); ' +
+    '  TLS_KEY=$(grep -E "^\\s*key:" /etc/hysteria/config.yaml 2>/dev/null | head -1 | sed "s/.*key:\\s*//" | tr -d " "); ' +
+    '  ACME_ON=$(grep -c "^acme:" /etc/hysteria/config.yaml 2>/dev/null || echo 0); ' +
+    '  if [ -n "$TLS_CERT" ]; then ' +
+    '    echo "TLS mode: shared (Caddy cert)"; ' +
+    '    echo "cert: $TLS_CERT"; ' +
+    '    if [ -f "$TLS_CERT" ]; then echo "  └─ exists ✓ ($(stat -c %s "$TLS_CERT") bytes, perms $(stat -c %a "$TLS_CERT"))"; ' +
+    '    else echo "  └─ FILE MISSING ✗ (Hy2 не сможет загрузиться!)"; fi; ' +
+    '    echo "key:  $TLS_KEY"; ' +
+    '    if [ -f "$TLS_KEY" ]; then echo "  └─ exists ✓ (perms $(stat -c %a "$TLS_KEY"))"; ' +
+    '    else echo "  └─ FILE MISSING ✗"; fi; ' +
+    '  elif [ "$ACME_ON" -gt 0 ]; then ' +
+    '    echo "TLS mode: ACME (Hy2 сам получает cert)"; ' +
+    '    echo "(убедитесь что порт 80/tcp свободен или что cert уже получен)"; ' +
+    '  else echo "TLS: НЕ НАСТРОЕН в конфиге ✗"; fi; ' +
+    'else echo "/etc/hysteria/config.yaml не найден"; fi; ' +
+    'echo ""; echo "=== Masquerade ==="; ' +
+    'if [ -f /etc/hysteria/config.yaml ]; then ' +
+    '  MASQ_TYPE=$(awk "/^masquerade:/{f=1;next} f && /^[^ ]/{f=0} f && /type:/{print \\$2; exit}" /etc/hysteria/config.yaml); ' +
+    '  echo "type: ${MASQ_TYPE:-(не задано)}"; ' +
+    'fi'
   ]);
   let out = '';
   p.stdout.on('data', d => out += d.toString());
   p.on('close', () => res.json({ output: out }));
   p.on('error', () => res.json({ output: 'команды недоступны' }));
+});
+
+// Просмотр активного hysteria config.yaml (с маскировкой паролей)
+app.get('/api/diag/hysteria-config', requireAuth, (req, res) => {
+  const cfgPath = '/etc/hysteria/config.yaml';
+  if (!fs.existsSync(cfgPath)) {
+    return res.json({ exists: false, output: '/etc/hysteria/config.yaml не найден' });
+  }
+  try {
+    let raw = fs.readFileSync(cfgPath, 'utf8');
+    // Маскируем пароли userpass
+    raw = raw.replace(/(\s+)([a-zA-Z0-9_.-]+)(:\s*)"[^"]+"/g,
+      (m, sp, user, col) => `${sp}${user}${col}"***masked***"`);
+    res.json({ exists: true, output: raw });
+  } catch (e) {
+    res.json({ exists: false, output: 'Ошибка чтения: ' + e.message });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -706,7 +747,7 @@ function handleInstallHy2(ws, data) {
       ws.send(JSON.stringify({
         type: 'install_done',
         links: {
-          hy2: `hysteria2://${encodeURIComponent(password)}@${domain}:443?sni=${domain}#RIXXX`
+          hy2: `hysteria2://default:${encodeURIComponent(password)}@${domain}:443?sni=${domain}&insecure=0#RIXXX`
         }
       }));
     } else {
@@ -761,7 +802,7 @@ function handleInstallBoth(ws, data) {
           type: 'install_done',
           links: {
             naive: `naive+https://${naiveLogin}:${naivePassword}@${domain}:443`,
-            hy2:   `hysteria2://${encodeURIComponent(hy2Password)}@${domain}:443?sni=${domain}#RIXXX`
+            hy2:   `hysteria2://default:${encodeURIComponent(hy2Password)}@${domain}:443?sni=${domain}&insecure=0#RIXXX`
           }
         }));
       } else {

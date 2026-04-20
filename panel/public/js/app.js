@@ -139,6 +139,19 @@ async function loadDiagLogs(kind) {
   }
 }
 
+async function loadDiagHysteriaConfig() {
+  const box = document.getElementById('diagHysteriaCfg');
+  if (!box) return;
+  box.textContent = 'Загружаю...';
+  try {
+    const res = await fetch('/api/diag/hysteria-config');
+    const d = await res.json();
+    box.textContent = d.output || '(пусто)';
+  } catch (e) {
+    box.textContent = 'Ошибка: ' + e.message;
+  }
+}
+
 // ─── DASHBOARD ──────────────────────────────────────────
 async function loadDashboard() {
   try {
@@ -236,7 +249,8 @@ async function renderQuickLinks(status) {
       const { users } = await r.json();
       users.slice(0, 3).forEach(u => {
         hasAny = true;
-        const link = `hysteria2://${encodeURIComponent(u.password)}@${status.domain}:443?sni=${status.domain}#${encodeURIComponent(u.username)}`;
+        // userpass: в URI auth = username:password (см. docs hysteria2 URI-Scheme)
+        const link = `hysteria2://${encodeURIComponent(u.username)}:${encodeURIComponent(u.password)}@${status.domain}:443?sni=${status.domain}&insecure=0#${encodeURIComponent(u.username)}`;
         listEl.innerHTML += `
           <div class="quick-link-item">
             <span class="ql-type hy2-tag">Hy2</span>
@@ -504,7 +518,7 @@ async function loadUsers() {
       const link = status.installed && status.domain
         ? (currentUsersTab === 'naive'
             ? `naive+https://${u.username}:${u.password}@${status.domain}:443`
-            : `hysteria2://${encodeURIComponent(u.password)}@${status.domain}:443?sni=${status.domain}#${encodeURIComponent(u.username)}`)
+            : `hysteria2://${encodeURIComponent(u.username)}:${encodeURIComponent(u.password)}@${status.domain}:443?sni=${status.domain}&insecure=0#${encodeURIComponent(u.username)}`)
         : '';
       const date = u.createdAt ? new Date(u.createdAt).toLocaleDateString('ru') : '—';
       tbody.innerHTML += `
