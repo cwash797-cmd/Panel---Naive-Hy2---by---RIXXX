@@ -117,6 +117,8 @@ cat > /etc/hysteria/config.yaml << HYCFGEOF
 #  https://v2.hysteria.network/
 # ═══════════════════════════════════════════════
 
+# Если Caddy занимает TCP/443 — Hy2 слушает только UDP/443.
+# Hysteria2 работает поверх QUIC (UDP), TCP ему не нужен.
 listen: :443
 
 auth:
@@ -133,29 +135,54 @@ masquerade:
 HYCFGEOF
 
 if [[ "$USE_CADDY_CERT" == "1" ]]; then
-  CADDY_CERT_DIR="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}"
+  # Caddy хранит сертификаты в двух возможных путях (зависит от версии/ОС)
+  CADDY_CERT_DIR_NEW="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}"
+  CADDY_CERT_DIR_OLD="/root/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}"
 
-  log "  Ждём сертификат от Caddy..."
-  for i in $(seq 1 30); do
-    if [[ -f "${CADDY_CERT_DIR}/${DOMAIN}.crt" ]]; then
-      log "✅ Сертификат найден (${i}с)"
+  CADDY_CERT_DIR=""
+
+  log "  Ждём сертификат от Caddy (до 90с)..."
+  for i in $(seq 1 45); do
+    if [[ -f "${CADDY_CERT_DIR_NEW}/${DOMAIN}.crt" ]]; then
+      CADDY_CERT_DIR="${CADDY_CERT_DIR_NEW}"
+      log "✅ Сертификат найден (${i}х2 с) — /var/lib/caddy/..."
+      break
+    elif [[ -f "${CADDY_CERT_DIR_OLD}/${DOMAIN}.crt" ]]; then
+      CADDY_CERT_DIR="${CADDY_CERT_DIR_OLD}"
+      log "✅ Сертификат найден (${i}х2 с) — /root/.local/..."
       break
     fi
     sleep 2
   done
 
-  cat >> /etc/hysteria/config.yaml << HYTLSEOF
+  if [[ -z "$CADDY_CERT_DIR" ]]; then
+    log "⚠ Сертификат Caddy не найден за 90с. Hy2 переключается на ACME."
+    log "  Причина: Caddy ещё не выдал cert (DNS не прогрессировал?) или неверный путь."
+    log "  Fallback → Hy2 получает свой ACME-сертификат (порт 80 должен быть свободен)."
+    cat >> /etc/hysteria/config.yaml << HYACMEFALLBACKEOF
+acme:
+  domains:
+    - ${DOMAIN}
+  email: ${EMAIL}
+  ca: letsencrypt
+  listenHost: 0.0.0.0
+HYACMEFALLBACKEOF
+  else
+    # Разрешаем hysteria читать файлы Caddy
+    chmod -R 755 "$(dirname "$CADDY_CERT_DIR")" 2>/dev/null || true
+    chmod 644 "${CADDY_CERT_DIR}/${DOMAIN}.crt" 2>/dev/null || true
+    chmod 640 "${CADDY_CERT_DIR}/${DOMAIN}.key" 2>/dev/null || true
+
+    cat >> /etc/hysteria/config.yaml << HYTLSEOF
 tls:
   cert: ${CADDY_CERT_DIR}/${DOMAIN}.crt
-  key: ${CADDY_CERT_DIR}/${DOMAIN}.key
+  key:  ${CADDY_CERT_DIR}/${DOMAIN}.key
 HYTLSEOF
 
-  chmod -R 755 /var/lib/caddy 2>/dev/null || true
-
-  # Watcher на перезагрузку Hy2 при обновлении сертификата
-  cat > /etc/systemd/system/caddy-cert-watcher.path << 'WATCHEOF'
+    # Watcher: при обновлении сертификата Caddy → рестарт Hy2
+    cat > /etc/systemd/system/caddy-cert-watcher.path << 'WATCHEOF'
 [Unit]
-Description=Watch Caddy cert for changes -> restart hysteria
+Description=Watch Caddy cert for changes -> restart hysteria-server
 
 [Path]
 PathModified=/var/lib/caddy/.local/share/caddy/certificates
@@ -164,19 +191,24 @@ PathModified=/var/lib/caddy/.local/share/caddy/certificates
 WantedBy=multi-user.target
 WATCHEOF
 
-  cat > /etc/systemd/system/caddy-cert-watcher.service << 'WATCHSVCEOF'
+    cat > /etc/systemd/system/caddy-cert-watcher.service << 'WATCHSVCEOF'
 [Unit]
-Description=Restart hysteria on Caddy cert change
+Description=Restart hysteria-server on Caddy cert change
 
 [Service]
 Type=oneshot
 ExecStart=/bin/systemctl restart hysteria-server.service
 WATCHSVCEOF
 
-  systemctl enable caddy-cert-watcher.path >/dev/null 2>&1 || true
-  systemctl start caddy-cert-watcher.path >/dev/null 2>&1 || true
+    systemctl daemon-reload
+    systemctl enable caddy-cert-watcher.path >/dev/null 2>&1 || true
+    systemctl start  caddy-cert-watcher.path >/dev/null 2>&1 || true
+    log "✅ caddy-cert-watcher настроен"
+  fi
 
 else
+  # Standalone Hy2: получаем собственный ACME-сертификат
+  # ВАЖНО: порт 80 должен быть свободен для ACME challenge
   cat >> /etc/hysteria/config.yaml << HYACMEEOF
 acme:
   domains:
@@ -208,11 +240,20 @@ step 6
 log "▶ Systemd сервис Hysteria..."
 # ══════════════════════════════════════════════════════
 
-cat > /etc/systemd/system/hysteria-server.service << 'HYSVCEOF'
+if [[ "$USE_CADDY_CERT" == "1" ]]; then
+  HY_AFTER="After=network.target network-online.target caddy.service"
+  HY_WANTS="Wants=caddy.service"
+else
+  HY_AFTER="After=network.target network-online.target"
+  HY_WANTS=""
+fi
+
+cat > /etc/systemd/system/hysteria-server.service << HYSVCEOF
 [Unit]
 Description=Hysteria2 Server (by RIXXX)
 Documentation=https://v2.hysteria.network/
-After=network.target network-online.target
+${HY_AFTER}
+${HY_WANTS}
 Requires=network-online.target
 
 [Service]
@@ -224,8 +265,10 @@ WorkingDirectory=/etc/hysteria
 LimitNOFILE=1048576
 LimitNPROC=512
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-Restart=always
-RestartSec=5s
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
 StandardOutput=journal
 StandardError=journal
 
@@ -245,14 +288,23 @@ log "▶ Запуск Hysteria2..."
 
 systemctl restart hysteria-server 2>&1 || true
 
-for i in $(seq 1 15); do
-  if systemctl is-active --quiet hysteria-server 2>/dev/null; then
+for i in $(seq 1 20); do
+  STATUS=$(systemctl is-active hysteria-server 2>/dev/null || echo "unknown")
+  if [[ "$STATUS" == "active" ]]; then
     log "✅ Hysteria2 запущена (${i}с)"
+    break
+  elif [[ "$STATUS" == "failed" ]]; then
+    log "⚠ hysteria-server: failed — смотрите ниже:"
+    journalctl -u hysteria-server -n 20 --no-pager 2>/dev/null || true
+    log "  Попытка рестарта..."
+    systemctl reset-failed hysteria-server 2>/dev/null || true
+    systemctl start hysteria-server 2>/dev/null || true
     break
   fi
   sleep 1
-  if [[ $i -eq 15 ]]; then
-    log "⚠ Hy2 запускается медленно, см.: journalctl -u hysteria-server -n 30"
+  if [[ $i -eq 20 ]]; then
+    log "⚠ Hy2 не запустилась за 20с. Команда для диагностики:"
+    log "  journalctl -u hysteria-server -n 50 --no-pager"
   fi
 done
 

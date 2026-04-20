@@ -224,7 +224,23 @@ app.post('/api/service/:kind/:action', requireAuth, (req, res) => {
 
   const p = spawn('systemctl', [action, unit]);
   p.on('close', (code) => {
-    res.json({ success: code === 0, message: code === 0 ? `${unit} ${action} OK` : `${unit} ${action} failed` });
+    if (code !== 0) {
+      return res.json({ success: false, message: `${unit} ${action} failed (code ${code})` });
+    }
+    // Даём сервису 1.5с подняться, потом проверяем реальный статус
+    setTimeout(() => {
+      checkServiceActive(unit).then(active => {
+        res.json({
+          success: true,
+          active,
+          message: active
+            ? `${unit} ${action} — сервис активен`
+            : `${unit} ${action} — команда принята (сервис ещё стартует)`
+        });
+      }).catch(() => {
+        res.json({ success: true, active: null, message: `${unit} ${action} OK` });
+      });
+    }, 1500);
   });
   p.on('error', () => res.json({ success: false, message: 'systemctl недоступен' }));
 });
@@ -329,29 +345,48 @@ function writeHysteriaConfig(cfg) {
   (cfg.hy2Users || []).forEach(u => {
     if (u.username && u.password) userpass[u.username] = u.password;
   });
-  if (Object.keys(userpass).length === 0) userpass.default = crypto.randomBytes(16).toString('base64url');
+  if (Object.keys(userpass).length === 0) {
+    userpass.default = crypto.randomBytes(16).toString('base64url');
+  }
 
   const hyCfgPath = '/etc/hysteria/config.yaml';
-  let existing = null;
+
+  // Читаем существующий конфиг и ОБНОВЛЯЕМ только секцию auth.
+  // Это критично: TLS/ACME/masquerade/quic секции должны сохраняться!
+  let base = null;
   try {
-    existing = yaml.load(fs.readFileSync(hyCfgPath, 'utf8'));
+    const raw = fs.readFileSync(hyCfgPath, 'utf8');
+    base = yaml.load(raw);
   } catch {
-    existing = null;
+    base = null;
   }
-  const base = existing || {
-    listen: ':443',
-    masquerade: { type: 'proxy', proxy: { url: 'https://www.bing.com', rewriteHost: true } },
-    ignoreClientBandwidth: true,
-    quic: {
-      initStreamReceiveWindow: 8388608, maxStreamReceiveWindow: 8388608,
-      initConnReceiveWindow: 20971520, maxConnReceiveWindow: 20971520,
-      maxIdleTimeout: '30s', keepAlivePeriod: '10s', disablePathMTUDiscovery: false
-    }
-  };
-  base.auth = { type: 'userpass', userpass };
+
+  if (base && typeof base === 'object') {
+    // Только обновляем userpass — всё остальное (tls/acme/quic/masquerade) не трогаем
+    if (!base.auth) base.auth = { type: 'userpass' };
+    base.auth.type = 'userpass';
+    base.auth.userpass = userpass;
+  } else {
+    // Файла нет или повреждён — создаём минимальный (без TLS, т.к. неизвестен путь к cert)
+    // В этом случае hysteria попытается поднять ACME
+    console.warn('[writeHysteriaConfig] /etc/hysteria/config.yaml not found — creating minimal config (no TLS). ' +
+                 'Hysteria2 may need manual restart after cert is ready.');
+    base = {
+      listen: ':443',
+      auth: { type: 'userpass', userpass },
+      masquerade: { type: 'proxy', proxy: { url: 'https://www.bing.com', rewriteHost: true } },
+      acme: { domains: [cfg.domain], email: cfg.email || 'admin@' + cfg.domain, ca: 'letsencrypt', listenHost: '0.0.0.0' },
+      ignoreClientBandwidth: true,
+      quic: {
+        initStreamReceiveWindow: 8388608, maxStreamReceiveWindow: 8388608,
+        initConnReceiveWindow: 20971520, maxConnReceiveWindow: 20971520,
+        maxIdleTimeout: '30s', keepAlivePeriod: '10s', disablePathMTUDiscovery: false
+      }
+    };
+  }
 
   try {
-    fs.writeFileSync(hyCfgPath, yaml.dump(base, { lineWidth: 120 }), 'utf8');
+    fs.writeFileSync(hyCfgPath, yaml.dump(base, { lineWidth: 120, quotingType: '"' }), 'utf8');
     return true;
   } catch (e) {
     console.error('hysteria config write error:', e.message);

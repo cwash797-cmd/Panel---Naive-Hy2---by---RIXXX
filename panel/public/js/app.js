@@ -227,12 +227,19 @@ async function renderQuickLinks(status) {
 }
 
 async function serviceAction(kind, action) {
-  showToast(`${kind === 'naive' ? 'Caddy' : 'Hysteria2'}: ${action}...`, 'info');
+  const label = kind === 'naive' ? 'Caddy' : 'Hysteria2';
+  const badgeId = kind === 'naive' ? 'naiveStatusBadge' : 'hy2StatusBadge';
+  showToast(`${label}: ${action}...`, 'info');
   try {
     const res = await fetch(`/api/service/${kind}/${action}`, { method: 'POST' });
     const data = await res.json();
     showToast(data.message, data.success ? 'success' : 'error');
-    setTimeout(loadDashboard, 1500);
+    // Обновляем бейдж немедленно по ответу сервера
+    if (data.success && data.active !== undefined && data.active !== null) {
+      setStatusBadge(badgeId, data.active);
+    }
+    // Затем через 2с — полное обновление дашборда
+    setTimeout(loadDashboard, 2000);
   } catch {
     showToast('Ошибка соединения', 'error');
   }
