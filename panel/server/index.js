@@ -137,6 +137,36 @@ function isValidPassword(s) {
     && /^[A-Za-z0-9!@#$%^&*_+\-=.,~]+$/.test(s);
 }
 
+// Срок действия пользователя: 0 = бессрочно, иначе число дней (1..3650)
+function isValidExpireDays(n) {
+  if (n === undefined || n === null || n === '' || n === 0 || n === '0') return true;
+  const v = parseInt(n, 10);
+  return Number.isFinite(v) && v >= 1 && v <= 3650;
+}
+
+// Вычислить дату окончания (ISO) от now + days. days<=0 → null (бессрочно)
+function computeExpiresAt(days) {
+  const d = parseInt(days, 10);
+  if (!Number.isFinite(d) || d <= 0) return null;
+  return new Date(Date.now() + d * 86400 * 1000).toISOString();
+}
+
+// Истёк ли пользователь?
+function isExpired(user) {
+  if (!user || !user.expiresAt) return false;
+  const t = Date.parse(user.expiresAt);
+  if (!Number.isFinite(t)) return false;
+  return Date.now() >= t;
+}
+
+// Оставшиеся секунды до истечения (для UI)
+function remainingSeconds(user) {
+  if (!user || !user.expiresAt) return null;
+  const t = Date.parse(user.expiresAt);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Math.floor((t - Date.now()) / 1000));
+}
+
 // ═══════════════════════════════════════════════════════════
 //  AUTH
 // ═══════════════════════════════════════════════════════════
@@ -250,7 +280,9 @@ app.post('/api/service/:kind/:action', requireAuth, (req, res) => {
 // ═══════════════════════════════════════════════════════════
 function writeCaddyfile(cfg) {
   if (!cfg.stack.naive || !cfg.domain) return false;
+  // Фильтруем истёкших пользователей — их basic_auth не попадёт в Caddyfile (подключиться не смогут)
   const lines = (cfg.naiveUsers || [])
+    .filter(u => !isExpired(u))
     .map(u => `    basic_auth ${u.username} ${u.password}`)
     .join('\n');
 
@@ -304,21 +336,32 @@ function reloadCaddy() {
   });
 }
 
+function enrichUser(u) {
+  return {
+    ...u,
+    expiresAt: u.expiresAt || null,
+    remainingSec: remainingSeconds(u),
+    expired: isExpired(u)
+  };
+}
+
 app.get('/api/naive/users', requireAuth, (req, res) => {
   const cfg = loadConfig();
-  res.json({ users: cfg.naiveUsers || [] });
+  res.json({ users: (cfg.naiveUsers || []).map(enrichUser) });
 });
 
 app.post('/api/naive/users', requireAuth, async (req, res) => {
-  const { username, password } = req.body || {};
+  const { username, password, expireDays } = req.body || {};
   if (!isValidUsername(username)) return res.json({ success: false, message: 'Логин 1-32 симв. (A-Z, a-z, 0-9, . _ -)' });
   if (!isValidPassword(password)) return res.json({ success: false, message: 'Пароль 8-128 символов (без пробелов)' });
+  if (!isValidExpireDays(expireDays)) return res.json({ success: false, message: 'Срок: 1..3650 дней или 0 (бессрочно)' });
 
   const cfg = loadConfig();
   if (cfg.naiveUsers.find(u => u.username === username)) {
     return res.json({ success: false, message: 'Пользователь уже существует' });
   }
-  cfg.naiveUsers.push({ username, password, createdAt: new Date().toISOString() });
+  const expiresAt = computeExpiresAt(expireDays);
+  cfg.naiveUsers.push({ username, password, createdAt: new Date().toISOString(), expiresAt });
   saveConfig(cfg);
 
   let reloaded = true;
@@ -348,6 +391,136 @@ app.delete('/api/naive/users/:username', requireAuth, async (req, res) => {
   res.json({ success: true });
 });
 
+// Продлить/изменить срок: { expireDays: N } (0 = бессрочно, N>0 = now + N дней)
+app.patch('/api/naive/users/:username', requireAuth, async (req, res) => {
+  const { username } = req.params;
+  const { expireDays } = req.body || {};
+  if (!isValidExpireDays(expireDays)) return res.json({ success: false, message: 'Срок: 1..3650 дней или 0' });
+
+  const cfg = loadConfig();
+  const user = cfg.naiveUsers.find(u => u.username === username);
+  if (!user) return res.json({ success: false, message: 'Не найден' });
+  user.expiresAt = computeExpiresAt(expireDays);
+  saveConfig(cfg);
+
+  if (cfg.installed && cfg.stack.naive) {
+    writeCaddyfile(cfg);
+    await reloadCaddy();
+  }
+  res.json({ success: true, expiresAt: user.expiresAt });
+});
+
+// ═══════════════════════════════════════════════════════════
+//  IP BYPASS (RU direct) — общий список для ACL Hy2
+// ═══════════════════════════════════════════════════════════
+const BYPASS_FILE    = path.join(DATA_DIR, 'bypass.json');
+const HY2_ACL_PATH   = '/etc/hysteria/bypass-ru.acl';
+
+// Список сервисов, которые блокируют иностранные IP — их лучше пускать напрямую.
+// Обновляется пользователем через API /api/bypass.
+function loadBypass() {
+  try {
+    if (!fs.existsSync(BYPASS_FILE)) {
+      // Дефолт — пусто, т.е. bypass выключен
+      const d = { enabled: false, cidrs: [], source: '', updatedAt: null };
+      fs.writeFileSync(BYPASS_FILE, JSON.stringify(d, null, 2));
+      return d;
+    }
+    const raw = JSON.parse(fs.readFileSync(BYPASS_FILE, 'utf8'));
+    if (!Array.isArray(raw.cidrs)) raw.cidrs = [];
+    return raw;
+  } catch {
+    return { enabled: false, cidrs: [], source: '', updatedAt: null };
+  }
+}
+function saveBypass(b) {
+  fs.writeFileSync(BYPASS_FILE, JSON.stringify(b, null, 2));
+}
+
+// Применяет ACL bypass к переданному Hysteria-конфигу (in-place).
+// Hysteria2 ACL синтаксис: "<action>(<arg>) <target>". Используем direct(0) для IP-сетей.
+// Файл: по одной строке; записываем только при наличии активного bypass.
+function applyBypassAcl(base, cfg) {
+  const b = loadBypass();
+  if (!b.enabled || !Array.isArray(b.cidrs) || b.cidrs.length === 0) {
+    // выключено — удаляем из конфига acl, если там был наш файл
+    if (base.acl && base.acl.file === HY2_ACL_PATH) delete base.acl;
+    try { if (fs.existsSync(HY2_ACL_PATH)) fs.unlinkSync(HY2_ACL_PATH); } catch {}
+    return;
+  }
+  // Пишем ACL-файл
+  try {
+    fs.mkdirSync(path.dirname(HY2_ACL_PATH), { recursive: true });
+    const lines = b.cidrs
+      .filter(c => /^[0-9a-fA-F:.\/]+$/.test(c))
+      .map(c => `direct(${c})`)
+      .join('\n');
+    fs.writeFileSync(HY2_ACL_PATH, lines + '\n', 'utf8');
+    base.acl = { file: HY2_ACL_PATH };
+  } catch (e) {
+    console.error('[bypass] write acl failed:', e.message);
+  }
+}
+
+app.get('/api/bypass', requireAuth, (req, res) => {
+  const b = loadBypass();
+  res.json({
+    enabled: !!b.enabled,
+    count:   (b.cidrs || []).length,
+    source:  b.source || '',
+    updatedAt: b.updatedAt || null,
+    // первые 50 строк для предпросмотра
+    preview: (b.cidrs || []).slice(0, 50)
+  });
+});
+
+// Загрузка списка: принимает либо { cidrs: ["1.2.3.0/24", ...] },
+// либо { json: { "service.ru": ["1.2.3.0/24", ...], ... } } (формат пользовательского файла)
+app.post('/api/bypass', requireAuth, async (req, res) => {
+  const { cidrs, json, enabled, source } = req.body || {};
+  const b = loadBypass();
+
+  let newList = null;
+  if (Array.isArray(cidrs)) {
+    newList = cidrs;
+  } else if (json && typeof json === 'object') {
+    const set = new Set();
+    Object.values(json).forEach(arr => {
+      if (Array.isArray(arr)) arr.forEach(c => { if (typeof c === 'string') set.add(c.trim()); });
+    });
+    newList = Array.from(set);
+  }
+
+  if (newList) {
+    // Валидация CIDR — оставляем только корректные
+    const re = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$|^[0-9a-fA-F:]+\/\d{1,3}$/;
+    b.cidrs = newList.map(s => String(s).trim()).filter(s => re.test(s));
+    b.source = typeof source === 'string' ? source.slice(0, 128) : b.source;
+    b.updatedAt = new Date().toISOString();
+  }
+  if (typeof enabled === 'boolean') b.enabled = enabled;
+
+  saveBypass(b);
+
+  // Применяем немедленно, если Hy2 установлен
+  const cfg = loadConfig();
+  if (cfg.installed && cfg.stack.hy2) {
+    writeHysteriaConfig(cfg);
+    await reloadHysteria();
+  }
+  res.json({ success: true, enabled: !!b.enabled, count: b.cidrs.length });
+});
+
+app.delete('/api/bypass', requireAuth, async (req, res) => {
+  saveBypass({ enabled: false, cidrs: [], source: '', updatedAt: null });
+  const cfg = loadConfig();
+  if (cfg.installed && cfg.stack.hy2) {
+    writeHysteriaConfig(cfg);
+    await reloadHysteria();
+  }
+  res.json({ success: true });
+});
+
 // ═══════════════════════════════════════════════════════════
 //  HY2 USERS
 // ═══════════════════════════════════════════════════════════
@@ -355,8 +528,9 @@ function writeHysteriaConfig(cfg) {
   if (!cfg.stack.hy2 || !cfg.domain) return false;
 
   const userpass = {};
+  // Фильтруем истёкших пользователей — их не будет в userpass (подключиться не смогут)
   (cfg.hy2Users || []).forEach(u => {
-    if (u.username && u.password) userpass[u.username] = u.password;
+    if (u.username && u.password && !isExpired(u)) userpass[u.username] = u.password;
   });
   if (Object.keys(userpass).length === 0) {
     userpass.default = crypto.randomBytes(16).toString('base64url');
@@ -379,6 +553,8 @@ function writeHysteriaConfig(cfg) {
     if (!base.auth) base.auth = { type: 'userpass' };
     base.auth.type = 'userpass';
     base.auth.userpass = userpass;
+    // ACL bypass (русские сервисы идут direct, минуя VPN): подставляем, если настроен
+    applyBypassAcl(base, cfg);
   } else {
     // Файла нет или повреждён — создаём минимальный (без TLS, т.к. неизвестен путь к cert)
     // В этом случае hysteria попытается поднять ACME
@@ -396,6 +572,7 @@ function writeHysteriaConfig(cfg) {
         maxIdleTimeout: '30s', keepAlivePeriod: '10s', disablePathMTUDiscovery: false
       }
     };
+    applyBypassAcl(base, cfg);
   }
 
   try {
@@ -417,19 +594,21 @@ function reloadHysteria() {
 
 app.get('/api/hy2/users', requireAuth, (req, res) => {
   const cfg = loadConfig();
-  res.json({ users: cfg.hy2Users || [] });
+  res.json({ users: (cfg.hy2Users || []).map(enrichUser) });
 });
 
 app.post('/api/hy2/users', requireAuth, async (req, res) => {
-  const { username, password } = req.body || {};
+  const { username, password, expireDays } = req.body || {};
   if (!isValidUsername(username)) return res.json({ success: false, message: 'Логин 1-32 символа' });
   if (!isValidPassword(password)) return res.json({ success: false, message: 'Пароль 8-128 символов' });
+  if (!isValidExpireDays(expireDays)) return res.json({ success: false, message: 'Срок: 1..3650 дней или 0 (бессрочно)' });
 
   const cfg = loadConfig();
   if (cfg.hy2Users.find(u => u.username === username)) {
     return res.json({ success: false, message: 'Пользователь уже существует' });
   }
-  cfg.hy2Users.push({ username, password, createdAt: new Date().toISOString() });
+  const expiresAt = computeExpiresAt(expireDays);
+  cfg.hy2Users.push({ username, password, createdAt: new Date().toISOString(), expiresAt });
   saveConfig(cfg);
 
   if (cfg.installed && cfg.stack.hy2) {
@@ -456,6 +635,25 @@ app.delete('/api/hy2/users/:username', requireAuth, async (req, res) => {
     await reloadHysteria();
   }
   res.json({ success: true });
+});
+
+// Продлить/изменить срок Hy2: { expireDays: N }
+app.patch('/api/hy2/users/:username', requireAuth, async (req, res) => {
+  const { username } = req.params;
+  const { expireDays } = req.body || {};
+  if (!isValidExpireDays(expireDays)) return res.json({ success: false, message: 'Срок: 1..3650 дней или 0' });
+
+  const cfg = loadConfig();
+  const user = cfg.hy2Users.find(u => u.username === username);
+  if (!user) return res.json({ success: false, message: 'Не найден' });
+  user.expiresAt = computeExpiresAt(expireDays);
+  saveConfig(cfg);
+
+  if (cfg.installed && cfg.stack.hy2) {
+    writeHysteriaConfig(cfg);
+    await reloadHysteria();
+  }
+  res.json({ success: true, expiresAt: user.expiresAt });
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -811,6 +1009,43 @@ function handleInstallBoth(ws, data) {
     });
   });
 }
+
+// ═══════════════════════════════════════════════════════════
+//  EXPIRE CHECKER — каждые 5 минут фильтрует истёкших и релоадит сервисы
+// ═══════════════════════════════════════════════════════════
+let _lastExpireSig = '';
+async function expireChecker() {
+  try {
+    const cfg = loadConfig();
+    if (!cfg.installed) return;
+
+    // Сигнатура «кто истёк» — чтобы не релоадить без причины
+    const sig = JSON.stringify([
+      (cfg.naiveUsers || []).filter(isExpired).map(u => u.username).sort(),
+      (cfg.hy2Users   || []).filter(isExpired).map(u => u.username).sort()
+    ]);
+    if (sig === _lastExpireSig) return;
+    _lastExpireSig = sig;
+
+    const naiveExpired = (cfg.naiveUsers || []).filter(isExpired).length;
+    const hy2Expired   = (cfg.hy2Users   || []).filter(isExpired).length;
+    if (naiveExpired === 0 && hy2Expired === 0) return;
+
+    console.log(`[expire-check] naive=${naiveExpired} hy2=${hy2Expired} — обновляю конфиги`);
+    if (cfg.stack.naive && naiveExpired > 0) {
+      writeCaddyfile(cfg);
+      await reloadCaddy();
+    }
+    if (cfg.stack.hy2 && hy2Expired > 0) {
+      writeHysteriaConfig(cfg);
+      await reloadHysteria();
+    }
+  } catch (e) {
+    console.error('[expire-check] error:', e.message);
+  }
+}
+setInterval(expireChecker, 5 * 60 * 1000);
+setTimeout(expireChecker, 20 * 1000); // первый запуск через 20 сек после старта
 
 // ─── SPA fallback ─────────────────────────────────────────
 app.get(/^(?!\/api).*/, (req, res) => {

@@ -114,6 +114,10 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
         <span>Тюнинг</span>
       </a>
+      <a href="#" class="nav-item" data-page="bypass">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/><circle cx="7" cy="6" r="2" fill="currentColor"/><circle cx="17" cy="12" r="2" fill="currentColor"/><circle cx="7" cy="18" r="2" fill="currentColor"/></svg>
+        <span>Bypass (прямой трафик)</span>
+      </a>
       <a href="#" class="nav-item" data-page="diag">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <span>Диагностика</span>
@@ -500,6 +504,7 @@
                   <th>Пароль</th>
                   <th>Ссылка подключения</th>
                   <th>Создан</th>
+                  <th>Срок</th>
                   <th>Действия</th>
                 </tr>
               </thead>
@@ -518,6 +523,36 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           Обновить
         </button>
+      </div>
+
+      <div class="card info-card" style="margin-bottom:18px">
+        <div class="card-body">
+          <h3 style="margin-top:0">Что это и зачем?</h3>
+          <p style="color:var(--text-secondary);line-height:1.55;margin:6px 0 10px 0">
+            Linux по умолчанию настроен под обычный веб-трафик, а не под VPN. Для прокси это означает:
+            медленный TCP на больших задержках (NaiveProxy) и потери UDP-пакетов при высоком трафике (Hysteria2).
+            На этой странице <strong>один раз</strong> применяется набор sysctl-параметров, который снимает эти ограничения.
+            Руками менять значения не нужно — они подобраны производителями Hysteria2/Caddy и проверены на практике.
+          </p>
+          <ul class="tuning-expl">
+            <li><strong>BBR</strong> (<code>net.ipv4.tcp_congestion_control=bbr</code>) — современный алгоритм контроля перегрузок
+              от Google. Даёт <strong>в 2–10 раз больше пропускной способности</strong> на TCP-соединениях с потерями
+              (особенно если клиент далеко от сервера). Заменяет старый cubic. Требует ядро ≥ 4.9 (Ubuntu 20.04+ — OK).</li>
+            <li><strong>fq</strong> (<code>net.core.default_qdisc=fq</code>) — справедливая очередь пакетов,
+              нужна для корректной работы BBR. Без неё BBR работает, но хуже.</li>
+            <li><strong>UDP buffers 16 МБ</strong> (<code>net.core.rmem_max/wmem_max=16777216</code>) —
+              Hysteria2 на высоких скоростях (>100 Mbps) пишет в сокет большими порциями. Дефолтные 212 КБ
+              буфера приводят к потерям и падению скорости в разы. Hysteria <strong>сама предупреждает</strong>
+              об этом при старте, если буфер маленький.</li>
+            <li><strong>TCP Fast Open</strong> (<code>net.ipv4.tcp_fastopen=3</code>) — ускоряет повторные подключения
+              NaiveProxy к тому же серверу (на ~1 RTT быстрее).</li>
+            <li><strong>conntrack 1M</strong> — повышает лимит одновременных соединений (для 100+ пользователей).</li>
+          </ul>
+          <p style="color:var(--text-muted);font-size:13px;margin:10px 0 0 0">
+            Параметры сохраняются в <code>/etc/sysctl.d/99-rixxx-tune.conf</code> и применяются мгновенно,
+            а также автоматически после перезагрузки. Откатить: <code>rm /etc/sysctl.d/99-rixxx-tune.conf && sysctl --system</code>.
+          </p>
+        </div>
       </div>
 
       <div class="cards-row">
@@ -568,9 +603,8 @@
         <div class="card-body">
           <h3 class="tuning-title">Применить оптимизации</h3>
           <p class="tuning-desc">
-            Скрипт настроит <code>net.ipv4.tcp_congestion_control=bbr</code>, <code>net.core.default_qdisc=fq</code>,
-            UDP-буферы <code>rmem_max/wmem_max=16MB</code> и TCP Fast Open. Параметры сохранятся в <code>/etc/sysctl.d/99-rixxx-tune.conf</code>
-            и применятся сразу.
+            Установщик уже применил этот тюнинг автоматически. Кнопка нужна, если после установки вы откатывали sysctl,
+            обновляли ядро, или панель показывает что BBR/буферы ниже нормы (серые/красные бейджи сверху).
           </p>
           <div class="form-actions form-actions-center">
             <button class="btn btn-shiny btn-lg" id="applyTuneBtn" onclick="applyTuning()">
@@ -579,6 +613,92 @@
             </button>
           </div>
           <div id="tuneResult" class="alert hidden"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ────── BYPASS PAGE ────── -->
+    <div class="page" id="bypassPage">
+      <div class="page-header">
+        <h1 class="page-title">Bypass — прямой трафик</h1>
+        <button class="btn btn-outline btn-sm" onclick="loadBypass()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Обновить
+        </button>
+      </div>
+
+      <div class="card info-card" style="margin-bottom:18px">
+        <div class="card-body">
+          <h3 style="margin-top:0">Зачем это нужно</h3>
+          <p style="color:var(--text-secondary);line-height:1.55;margin:6px 0 10px 0">
+            Некоторые сайты (российские банки, госуслуги, маркетплейсы) <strong>блокируют иностранные IP</strong>.
+            Если весь трафик идёт через VPN за рубежом — эти сайты не откроются. Решение — пускать трафик
+            к таким сайтам <strong>напрямую</strong>, минуя VPN. Это называется <em>split tunneling</em> / bypass.
+          </p>
+          <ul class="tuning-expl">
+            <li><strong>Hysteria2</strong> (UDP) поддерживает bypass на сервере через ACL — работает автоматически
+              для всех клиентов, настраивать на клиенте ничего не нужно.</li>
+            <li><strong>NaiveProxy</strong> (TCP через Caddy forward_proxy) <u>не поддерживает</u> серверный ACL.
+              Для Naive bypass настраивается только на клиенте (Happ/Karing/v2rayN — все поддерживают).
+              В инструкции ниже даны готовые списки.</li>
+          </ul>
+          <p style="color:var(--text-muted);font-size:13px;margin:10px 0 0 0">
+            После включения bypass применяется мгновенно — Hysteria2 перезапускается с новым ACL.
+          </p>
+        </div>
+      </div>
+
+      <div class="cards-row">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-wrap">
+              <div class="service-icon hy2">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+              </div>
+              <div>
+                <h3 class="card-title">Статус ACL для Hy2</h3>
+                <div class="card-subtitle" id="bypassSource">—</div>
+              </div>
+            </div>
+            <div class="service-status" id="bypassBadge"><span class="dot dot-gray"></span> —</div>
+          </div>
+          <div class="card-body">
+            <div class="info-rows">
+              <div class="info-row"><span class="info-key">Сетей в списке</span><span class="info-val mono" id="bypassCount">—</span></div>
+              <div class="info-row"><span class="info-key">Последнее обновление</span><span class="info-val mono" id="bypassUpdated">—</span></div>
+              <div class="info-row"><span class="info-key">Файл ACL</span><span class="info-val mono">/etc/hysteria/bypass-ru.acl</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <div class="card-body">
+          <h3 class="tuning-title">Загрузить / обновить список</h3>
+          <p class="tuning-desc">
+            Вставьте JSON-файл в формате <code>{"service.ru": ["1.2.3.0/24", ...], ...}</code>
+            или просто массив <code>["1.2.3.0/24", ...]</code>. Поддерживаются IPv4 и IPv6 в CIDR-нотации.
+          </p>
+          <div class="form-group">
+            <label class="form-label">JSON / список CIDR</label>
+            <textarea id="bypassInput" class="form-input" rows="8" placeholder='{"alfabank.ru":["5.101.37.0/24", ...], "gosuslugi.ru":[...]}' style="font-family:var(--font-mono);font-size:12px"></textarea>
+            <div class="form-hint">Источник (для заметок)</div>
+            <input id="bypassSourceInput" class="form-input" placeholder="например: antifilter.download от 20.04.2026" style="margin-top:6px">
+          </div>
+          <div class="form-actions" style="gap:10px">
+            <button class="btn btn-shiny" onclick="saveBypass(true)">Загрузить и включить</button>
+            <button class="btn btn-outline" onclick="saveBypass(false)">Только сохранить</button>
+            <button class="btn btn-outline" id="bypassToggleBtn" onclick="toggleBypass()">—</button>
+            <button class="btn btn-danger" onclick="clearBypass()">Очистить</button>
+          </div>
+          <div id="bypassResult" class="alert hidden"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <div class="card-body">
+          <h3 class="tuning-title">Предпросмотр (первые 50 сетей)</h3>
+          <pre id="bypassPreview" class="log-pre" style="max-height:240px">—</pre>
         </div>
       </div>
     </div>
@@ -801,10 +921,58 @@
           </button>
         </div>
       </div>
+      <div class="form-group">
+        <label class="form-label">Срок действия</label>
+        <select id="newUserExpire" class="form-input">
+          <option value="0">Бессрочно</option>
+          <option value="1">1 день</option>
+          <option value="3">3 дня</option>
+          <option value="7" selected>7 дней</option>
+          <option value="14">14 дней</option>
+          <option value="30">30 дней</option>
+          <option value="90">90 дней</option>
+          <option value="180">180 дней</option>
+          <option value="365">1 год</option>
+        </select>
+        <div class="form-hint">После истечения пользователь автоматически перестанет подключаться (проверка каждые 5 мин).</div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-outline" onclick="closeModal('addUserModal')">Отмена</button>
       <button class="btn btn-shiny" onclick="addUser()">Добавить</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="extendUserModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Продлить / изменить срок</h3>
+      <button class="modal-close" onclick="closeModal('extendUserModal')">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <p>Пользователь: <strong id="extendUserName"></strong></p>
+      <p class="form-hint" id="extendUserCurrent"></p>
+      <div class="form-group">
+        <label class="form-label">Новый срок (от текущего момента)</label>
+        <select id="extendUserDays" class="form-input">
+          <option value="0">Бессрочно</option>
+          <option value="1">1 день</option>
+          <option value="3">3 дня</option>
+          <option value="7" selected>7 дней</option>
+          <option value="14">14 дней</option>
+          <option value="30">30 дней</option>
+          <option value="90">90 дней</option>
+          <option value="180">180 дней</option>
+          <option value="365">1 год</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('extendUserModal')">Отмена</button>
+      <button class="btn btn-shiny" onclick="confirmExtendUser()">Сохранить</button>
     </div>
   </div>
 </div>

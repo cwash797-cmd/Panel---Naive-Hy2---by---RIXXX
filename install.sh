@@ -48,8 +48,44 @@ fi
 
 # ── OS check ────────────────────────────────────────────────────────────
 if ! command -v apt-get &>/dev/null; then
-  log_err "Поддерживается только Ubuntu/Debian"
+  log_err "Поддерживается только Ubuntu/Debian (apt-based)"
+  log_info "Если у вас CentOS/RHEL/Fedora/Alpine — используйте другую VPS-систему"
   exit 1
+fi
+
+# Определяем дистрибутив
+OS_ID=""; OS_VER=""; OS_CODENAME=""
+if [[ -f /etc/os-release ]]; then
+  OS_ID=$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+  OS_VER=$(grep -E '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+  OS_CODENAME=$(grep -E '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+fi
+log_info "ОС: ${OS_ID:-unknown} ${OS_VER:-?} (${OS_CODENAME:-?})"
+
+# Рекомендуем Ubuntu 22.04/24.04 и Debian 11/12
+case "$OS_ID" in
+  ubuntu)
+    case "$OS_VER" in
+      22.04|24.04) : ;;
+      20.04) log_warn "Ubuntu 20.04 — работает, но рекомендуется 22.04+ (ядро новее)" ;;
+      *) log_warn "Ubuntu $OS_VER — нестандартная версия, могут быть сюрпризы" ;;
+    esac ;;
+  debian)
+    case "$OS_VER" in
+      11|12) : ;;
+      *) log_warn "Debian $OS_VER — рекомендуется 11 (bullseye) или 12 (bookworm)" ;;
+    esac ;;
+  *)
+    log_warn "Дистрибутив '$OS_ID' официально не тестирован, но если apt работает — попробуем."
+    log_info "Поддерживаются: Ubuntu 22.04/24.04, Debian 11/12 (amd64/arm64)."
+    ;;
+esac
+
+# Проверка версии ядра для BBR (>=4.9)
+KERNEL_MAJ=$(uname -r | awk -F. '{print $1}')
+KERNEL_MIN=$(uname -r | awk -F. '{print $2}')
+if [[ "${KERNEL_MAJ}" -lt 4 ]] || { [[ "${KERNEL_MAJ}" -eq 4 ]] && [[ "${KERNEL_MIN}" -lt 9 ]]; }; then
+  log_warn "Ядро $(uname -r) < 4.9 — BBR недоступен, скорость TCP будет хуже"
 fi
 
 # ── Arch detection ──────────────────────────────────────────────────────
