@@ -556,15 +556,36 @@ function writeHysteriaConfig(cfg) {
     // ACL bypass (русские сервисы идут direct, минуя VPN): подставляем, если настроен
     applyBypassAcl(base, cfg);
   } else {
-    // Файла нет или повреждён — создаём минимальный (без TLS, т.к. неизвестен путь к cert)
-    // В этом случае hysteria попытается поднять ACME
-    console.warn('[writeHysteriaConfig] /etc/hysteria/config.yaml not found — creating minimal config (no TLS). ' +
-                 'Hysteria2 may need manual restart after cert is ready.');
+    // Файла нет или повреждён — создаём минимальный.
+    // Пытаемся найти сертификат Caddy через find (любой CA, новый или старый путь).
+    // Если не нашли — НЕ включаем ACME fallback (чтобы не сжечь LE rate limit 429),
+    // оставляем конфиг без TLS — Hy2 не стартует, пока админ вручную не допишет tls.
+    console.warn('[writeHysteriaConfig] /etc/hysteria/config.yaml not found — creating minimal config.');
+    let tlsBlock = null;
+    try {
+      const roots = [
+        '/var/lib/caddy/.local/share/caddy/certificates',
+        '/root/.local/share/caddy/certificates'
+      ];
+      for (const root of roots) {
+        if (!fs.existsSync(root)) continue;
+        // find <root> -type f -name "<domain>.crt"
+        const result = require('child_process').execSync(
+          `find "${root}" -type f -name "${cfg.domain}.crt" 2>/dev/null | head -1`,
+          { encoding: 'utf8' }
+        ).trim();
+        if (result && fs.existsSync(result) && fs.existsSync(result.replace(/\.crt$/, '.key'))) {
+          tlsBlock = { cert: result, key: result.replace(/\.crt$/, '.key') };
+          console.log('[writeHysteriaConfig] Found Caddy cert:', tlsBlock.cert);
+          break;
+        }
+      }
+    } catch (e) { /* ignore */ }
+
     base = {
       listen: ':443',
       auth: { type: 'userpass', userpass },
       masquerade: { type: 'file', file: { dir: '/var/www/html' } },
-      acme: { domains: [cfg.domain], email: cfg.email || 'admin@' + cfg.domain, ca: 'letsencrypt', listenHost: '0.0.0.0' },
       ignoreClientBandwidth: true,
       quic: {
         initStreamReceiveWindow: 8388608, maxStreamReceiveWindow: 8388608,
@@ -572,6 +593,11 @@ function writeHysteriaConfig(cfg) {
         maxIdleTimeout: '30s', keepAlivePeriod: '10s', disablePathMTUDiscovery: false
       }
     };
+    if (tlsBlock) {
+      base.tls = tlsBlock;
+    } else {
+      console.warn('[writeHysteriaConfig] No Caddy cert found. Hysteria2 will NOT start until TLS is configured manually.');
+    }
     applyBypassAcl(base, cfg);
   }
 
@@ -740,6 +766,111 @@ app.get('/api/diag/hysteria-config', requireAuth, (req, res) => {
     res.json({ exists: true, output: raw });
   } catch (e) {
     res.json({ exists: false, output: 'Ошибка чтения: ' + e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+//  HY2 TLS AUTO-FIX (заменяет acme: на tls: с путями к Caddy cert)
+// ═══════════════════════════════════════════════════════════
+// Частая проблема: при установке Caddy получил серт от ZeroSSL, install.sh
+// искал только по пути Let's Encrypt, не нашёл → прописал acme: в Hy2 конфиге →
+// Hy2 попытался получить свой серт LE → HTTP 429 rate limit на неделю.
+// Этот endpoint находит фактический серт Caddy через find и переписывает
+// секцию TLS Hy2 конфига.
+app.post('/api/diag/fix-hy2-tls', requireAuth, async (req, res) => {
+  try {
+    const cfg = loadConfig();
+    if (!cfg.stack || !cfg.stack.hy2) {
+      return res.status(400).json({ ok: false, error: 'Hy2 не установлен' });
+    }
+    const domain = cfg.domain;
+    if (!domain) {
+      return res.status(400).json({ ok: false, error: 'Домен не задан в config' });
+    }
+
+    // Ищем cert по всем возможным путям и CA
+    const roots = [
+      '/var/lib/caddy/.local/share/caddy/certificates',
+      '/root/.local/share/caddy/certificates'
+    ];
+    let certPath = null, keyPath = null, ca = null;
+    for (const root of roots) {
+      if (!fs.existsSync(root)) continue;
+      try {
+        const result = require('child_process').execSync(
+          `find "${root}" -type f -name "${domain}.crt" 2>/dev/null | head -1`,
+          { encoding: 'utf8' }
+        ).trim();
+        if (result && fs.existsSync(result)) {
+          const k = result.replace(/\.crt$/, '.key');
+          if (fs.existsSync(k)) {
+            certPath = result;
+            keyPath = k;
+            ca = path.basename(path.dirname(path.dirname(result)));
+            break;
+          }
+        }
+      } catch (e) { /* ignore find errors */ }
+    }
+
+    if (!certPath) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Сертификат Caddy не найден на диске',
+        hint: 'Caddy должен получить сертификат (проверьте: systemctl status caddy; journalctl -u caddy -n 50)'
+      });
+    }
+
+    // Ставим права чтоб Hy2 мог читать
+    try {
+      require('child_process').execSync(
+        `chmod -R 755 "${path.dirname(path.dirname(path.dirname(certPath)))}" 2>/dev/null; ` +
+        `chmod 644 "${certPath}" 2>/dev/null; ` +
+        `chmod 640 "${keyPath}" 2>/dev/null`,
+        { encoding: 'utf8' }
+      );
+    } catch {}
+
+    // Читаем config.yaml
+    const hyCfgPath = '/etc/hysteria/config.yaml';
+    let hyCfg = {};
+    if (fs.existsSync(hyCfgPath)) {
+      hyCfg = yaml.load(fs.readFileSync(hyCfgPath, 'utf8')) || {};
+    }
+
+    // Убираем acme: секцию, вставляем tls:
+    delete hyCfg.acme;
+    hyCfg.tls = { cert: certPath, key: keyPath };
+
+    // Пишем обратно
+    fs.writeFileSync(hyCfgPath, yaml.dump(hyCfg, { lineWidth: 120, quotingType: '"' }), 'utf8');
+
+    // Сбрасываем счётчик рестартов и перезапускаем Hy2
+    const { execSync } = require('child_process');
+    try { execSync('systemctl reset-failed hysteria-server 2>/dev/null'); } catch {}
+    try { execSync('systemctl restart hysteria-server'); } catch (e) {
+      return res.status(500).json({
+        ok: false,
+        error: 'Конфиг обновлён, но hysteria-server не перезапустился',
+        details: e.message,
+        certPath, keyPath, ca
+      });
+    }
+
+    // Проверяем что стартовал
+    await new Promise(r => setTimeout(r, 2500));
+    let active = false;
+    try { active = execSync('systemctl is-active hysteria-server').toString().trim() === 'active'; } catch {}
+
+    res.json({
+      ok: active,
+      message: active
+        ? `Hy2 TLS починен — cert от ${ca}, сервис запущен`
+        : `Конфиг обновлён, но сервис не активен. journalctl -u hysteria-server -n 30`,
+      certPath, keyPath, ca
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 

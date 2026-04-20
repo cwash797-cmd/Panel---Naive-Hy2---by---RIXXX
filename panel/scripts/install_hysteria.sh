@@ -202,38 +202,44 @@ PYEOF
     log "✅ HTTP/3 в Caddy отключён, UDP/443 свободен"
   fi
 
-  # Caddy хранит сертификаты в двух возможных путях (зависит от версии/ОС)
-  CADDY_CERT_DIR_NEW="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}"
-  CADDY_CERT_DIR_OLD="/root/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}"
-
+  # Caddy может получить сертификат от любого CA (LE / ZeroSSL / Google).
+  # Ищем через find по любому пути, не только acme-v02.api.letsencrypt.org.
+  CADDY_CERT_ROOTS=(
+    "/var/lib/caddy/.local/share/caddy/certificates"
+    "/root/.local/share/caddy/certificates"
+  )
   CADDY_CERT_DIR=""
 
-  log "  Ждём сертификат от Caddy (до 90с)..."
-  for i in $(seq 1 45); do
-    if [[ -f "${CADDY_CERT_DIR_NEW}/${DOMAIN}.crt" ]]; then
-      CADDY_CERT_DIR="${CADDY_CERT_DIR_NEW}"
-      log "✅ Сертификат найден (${i}х2 с) — /var/lib/caddy/..."
-      break
-    elif [[ -f "${CADDY_CERT_DIR_OLD}/${DOMAIN}.crt" ]]; then
-      CADDY_CERT_DIR="${CADDY_CERT_DIR_OLD}"
-      log "✅ Сертификат найден (${i}х2 с) — /root/.local/..."
-      break
-    fi
+  log "  Ждём сертификат от Caddy (до 150с, любой CA)..."
+  for i in $(seq 1 75); do
+    for ROOT in "${CADDY_CERT_ROOTS[@]}"; do
+      [[ -d "$ROOT" ]] || continue
+      FOUND=$(find "$ROOT" -type f -name "${DOMAIN}.crt" 2>/dev/null | head -1)
+      if [[ -n "$FOUND" && -f "${FOUND%.crt}.key" ]]; then
+        CADDY_CERT_DIR="$(dirname "$FOUND")"
+        CA_NAME="$(basename "$(dirname "$CADDY_CERT_DIR")")"
+        log "✅ Сертификат найден (${i}х2 с) — CA: ${CA_NAME}"
+        break 2
+      fi
+    done
     sleep 2
   done
 
   if [[ -z "$CADDY_CERT_DIR" ]]; then
-    log "⚠ Сертификат Caddy не найден за 90с. Hy2 переключается на ACME."
-    log "  Причина: Caddy ещё не выдал cert (DNS не прогрессировал?) или неверный путь."
-    log "  Fallback → Hy2 получает свой ACME-сертификат (порт 80 должен быть свободен)."
-    cat >> /etc/hysteria/config.yaml << HYACMEFALLBACKEOF
-acme:
-  domains:
-    - ${DOMAIN}
-  email: ${EMAIL}
-  ca: letsencrypt
-  listenHost: 0.0.0.0
-HYACMEFALLBACKEOF
+    log "⚠ Сертификат Caddy не найден за 150с."
+    log "  Hy2 НЕ запускается с собственным ACME (риск Let's Encrypt 429 rate limit)."
+    log "  Почините Caddy, потом: systemctl restart hysteria-server"
+    systemctl status caddy --no-pager -l 2>&1 | tail -10
+    cat >> /etc/hysteria/config.yaml << 'HYNOTLSEOF'
+# ⚠ Сертификат не был готов при установке.
+# После починки Caddy:
+#   1) find /var/lib/caddy -name '*.crt'
+#   2) Подставьте найденные пути:
+#      tls:
+#        cert: /var/lib/caddy/.../<domain>.crt
+#        key:  /var/lib/caddy/.../<domain>.key
+#   3) systemctl restart hysteria-server
+HYNOTLSEOF
   else
     # Разрешаем hysteria читать файлы Caddy
     chmod -R 755 "$(dirname "$CADDY_CERT_DIR")" 2>/dev/null || true
@@ -246,13 +252,14 @@ tls:
   key:  ${CADDY_CERT_DIR}/${DOMAIN}.key
 HYTLSEOF
 
-    # Watcher: при обновлении сертификата Caddy → рестарт Hy2
-    cat > /etc/systemd/system/caddy-cert-watcher.path << 'WATCHEOF'
+    # Watcher: при обновлении сертификата Caddy → рестарт Hy2.
+    # Используем CADDY_CERT_DIR (фактический путь с любым CA).
+    cat > /etc/systemd/system/caddy-cert-watcher.path << WATCHEOF
 [Unit]
 Description=Watch Caddy cert for changes -> restart hysteria-server
 
 [Path]
-PathModified=/var/lib/caddy/.local/share/caddy/certificates
+PathModified=${CADDY_CERT_DIR}
 
 [Install]
 WantedBy=multi-user.target

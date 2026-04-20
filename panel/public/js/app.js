@@ -153,6 +153,30 @@ async function loadDiagHysteriaConfig() {
   }
 }
 
+async function fixHy2Tls() {
+  const box = document.getElementById('fixHy2Result');
+  if (!box) return;
+  box.textContent = 'Ищем cert Caddy на диске, переписываем Hy2 конфиг, перезапускаем...';
+  try {
+    const res = await fetch('/api/diag/fix-hy2-tls', { method: 'POST' });
+    const d = await res.json();
+    const prefix = d.ok ? '✅ ' : '⚠ ';
+    const lines = [
+      prefix + (d.message || d.error || 'Готово'),
+      d.ca      ? ('CA: ' + d.ca) : null,
+      d.certPath ? ('cert: ' + d.certPath) : null,
+      d.keyPath  ? ('key:  ' + d.keyPath) : null,
+      d.hint     ? ('Подсказка: ' + d.hint) : null,
+      d.details  ? ('Детали: ' + d.details) : null
+    ].filter(Boolean);
+    box.textContent = lines.join('\n');
+    if (d.ok && typeof showToast === 'function') showToast('Hy2 TLS починен', 'success');
+    if (!d.ok && typeof showToast === 'function') showToast('Починка не удалась', 'error');
+  } catch (e) {
+    box.textContent = 'Ошибка запроса: ' + e.message;
+  }
+}
+
 // ─── DASHBOARD ──────────────────────────────────────────
 async function loadDashboard() {
   try {

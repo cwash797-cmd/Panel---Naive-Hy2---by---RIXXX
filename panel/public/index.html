@@ -734,6 +734,17 @@
         </div>
       </div>
 
+      <div class="card diag-card" style="border-left:4px solid var(--warn, #f59e0b)">
+        <div class="card-header">
+          <h3 class="card-title">🔧 Починить Hy2 TLS (авто)</h3>
+          <button class="btn btn-shiny btn-sm" onclick="fixHy2Tls()">Починить</button>
+        </div>
+        <div class="card-body">
+          <p class="muted">Если Hy2 падает с ошибкой <code>rateLimited</code> / <code>HTTP 429</code> / <code>could not get certificate</code> — значит он пытается получить свой ACME-сертификат, хотя Caddy уже выдал общий. Эта кнопка найдёт фактический cert Caddy (от любого CA: Let's Encrypt / ZeroSSL) и пропишет его в Hy2 конфиг. Потом перезапустит hysteria-server.</p>
+          <pre class="log-box" id="fixHy2Result" style="margin-top:12px">— нажмите «Починить» —</pre>
+        </div>
+      </div>
+
       <div class="cards-row diag-logs-row">
         <div class="card">
           <div class="card-header">
