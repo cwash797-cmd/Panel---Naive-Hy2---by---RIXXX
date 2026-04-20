@@ -329,16 +329,13 @@ HTMLEOF
 
   # ВАЖНО: Если Hy2 ставится параллельно — отключаем HTTP/3 в Caddy,
   # иначе Caddy займёт UDP/443 для QUIC и Hy2 не сможет биндиться.
+  # Caddyfile — минималистичный (1-в-1 как в рабочем d502280).
+  # НЕ добавляем здесь acme_ca/email в глобальный блок — это ломало установку
+  # у юзеров (Caddy либо валился на validate, либо отказывался получать cert,
+  # если email в global не совпадал с email в site TLS).
   {
     printf '{\n'
     printf '  order forward_proxy before file_server\n'
-    printf '  email %s\n' "${PROXY_EMAIL}"
-    # Явно фиксируем Let's Encrypt как единственный CA в глобальном блоке.
-    # Без этого Caddy может выбрать ZeroSSL — путь к серту станет
-    # certificates/acme.zerossl.com-v2-dv90/... вместо
-    # certificates/acme-v02.api.letsencrypt.org-directory/...
-    # — и Hysteria2 не найдёт cert, уйдёт в свой ACME и получит LE rate limit 429.
-    printf '  acme_ca https://acme-v02.api.letsencrypt.org/directory\n'
     if [[ $INSTALL_HY2 -eq 1 ]]; then
       printf '  servers {\n'
       printf '    protocols h1 h2\n'
@@ -370,11 +367,9 @@ HTMLEOF
   pkill -x caddy 2>/dev/null || true
   sleep 1
 
-  # КРИТИЧНО: гарантируем что Caddy хранит данные в /var/lib/caddy,
-  # а не в /root/.local/share/caddy — иначе Hysteria2 не найдёт сертификат.
-  mkdir -p /var/lib/caddy/.local/share/caddy /var/lib/caddy/.config/caddy
-  chmod -R 755 /var/lib/caddy 2>/dev/null || true
-
+  # systemd unit для Caddy — 1-в-1 как в рабочем d502280.
+  # НЕ добавляем Environment=HOME/XDG_* и не убираем PrivateTmp/ProtectSystem —
+  # эти правки ломали Caddy (серт не получается, сервис не стартует).
   cat > /etc/systemd/system/caddy.service << 'SVCEOF'
 [Unit]
 Description=Caddy with NaiveProxy (by RIXXX)
@@ -386,18 +381,13 @@ Requires=network-online.target
 Type=notify
 User=root
 Group=root
-# Принудительно фиксируем директории данных Caddy.
-# Без этого Caddy (под root) кладёт сертификаты в /root/.local/share/caddy,
-# а Hysteria2 ожидает их в /var/lib/caddy.
-Environment=HOME=/var/lib/caddy
-Environment=XDG_DATA_HOME=/var/lib/caddy/.local/share
-Environment=XDG_CONFIG_HOME=/var/lib/caddy/.config
 ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
 ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
 TimeoutStopSec=5s
 LimitNOFILE=1048576
 LimitNPROC=512
-# PrivateTmp + ProtectSystem убраны — они мешают Caddy писать в /var/lib/caddy
+PrivateTmp=true
+ProtectSystem=full
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=always
 RestartSec=5s
@@ -410,16 +400,6 @@ SVCEOF
 
   systemctl daemon-reload
   systemctl enable caddy >/dev/null 2>&1 || true
-
-  # Миграция: если на сервере есть старые сертификаты от Caddy под /root —
-  # переносим в /var/lib/caddy, чтобы не пришлось заново получать ACME.
-  if [[ -d /root/.local/share/caddy/certificates && \
-        ! -d /var/lib/caddy/.local/share/caddy/certificates ]]; then
-    log_info "Миграция сертификатов Caddy: /root/.local -> /var/lib/caddy"
-    mkdir -p /var/lib/caddy/.local/share/caddy
-    cp -a /root/.local/share/caddy/. /var/lib/caddy/.local/share/caddy/ 2>/dev/null || true
-    chmod -R 755 /var/lib/caddy 2>/dev/null || true
-  fi
 
   # ── Б7. Запуск Caddy ────────────────────────────────────────────────
   next_step "Запуск Caddy (получение TLS сертификата)..."
