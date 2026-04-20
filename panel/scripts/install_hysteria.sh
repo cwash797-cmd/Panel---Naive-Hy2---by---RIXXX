@@ -135,6 +135,62 @@ masquerade:
 HYCFGEOF
 
 if [[ "$USE_CADDY_CERT" == "1" ]]; then
+  # ── КРИТИЧНО: если Caddy уже запущен — он скорее всего слушает UDP/443
+  # для HTTP/3 (QUIC), и Hy2 не сможет занять этот порт. Перепишем Caddyfile
+  # с отключением HTTP/3 и перезагрузим Caddy ПЕРЕД запуском Hy2.
+  if [[ -f /etc/caddy/Caddyfile ]] && ! grep -q "protocols h1 h2" /etc/caddy/Caddyfile; then
+    log "  Отключаем HTTP/3 в Caddy (освобождаем UDP/443 для Hy2)..."
+
+    # Создаём бэкап
+    cp /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.bak.$(date +%s)" 2>/dev/null || true
+
+    # Пытаемся через python3 (надёжнее), fallback на sed
+    PY_OK=0
+    if command -v python3 >/dev/null 2>&1; then
+      python3 << 'PYEOF' && PY_OK=1
+import re, sys
+p = '/etc/caddy/Caddyfile'
+try:
+    with open(p) as f:
+        src = f.read()
+    m = re.match(r'^\s*\{([^{}]*)\}', src, re.DOTALL)
+    if m:
+        inner = m.group(1)
+        if 'protocols h1 h2' not in inner:
+            new_inner = inner.rstrip() + '\n  servers {\n    protocols h1 h2\n  }\n'
+            new_src = '{' + new_inner + '}' + src[m.end():]
+            with open(p, 'w') as f:
+                f.write(new_src)
+            print("Caddyfile updated: HTTP/3 disabled")
+    else:
+        new_src = '{\n  servers {\n    protocols h1 h2\n  }\n}\n\n' + src
+        with open(p, 'w') as f:
+            f.write(new_src)
+        print("Caddyfile updated: added global block with HTTP/3 disabled")
+    sys.exit(0)
+except Exception as e:
+    print("python edit error:", e, file=sys.stderr)
+    sys.exit(1)
+PYEOF
+    fi
+
+    if [[ $PY_OK -ne 1 ]]; then
+      log "  (fallback на sed)"
+      # Если глобальный блок есть — заменяем первое } на servers + }
+      if head -n 5 /etc/caddy/Caddyfile | grep -qE '^\s*\{\s*$'; then
+        sed -i '0,/^}/s|^}|  servers {\n    protocols h1 h2\n  }\n}|' /etc/caddy/Caddyfile
+      else
+        # Глобального блока нет — добавляем в начало
+        sed -i '1i {\n  servers {\n    protocols h1 h2\n  }\n}\n' /etc/caddy/Caddyfile
+      fi
+    fi
+
+    # Перезагружаем Caddy чтобы UDP/443 освободился
+    systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+    sleep 2
+    log "✅ HTTP/3 в Caddy отключён, UDP/443 свободен"
+  fi
+
   # Caddy хранит сертификаты в двух возможных путях (зависит от версии/ОС)
   CADDY_CERT_DIR_NEW="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}"
   CADDY_CERT_DIR_OLD="/root/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${DOMAIN}"

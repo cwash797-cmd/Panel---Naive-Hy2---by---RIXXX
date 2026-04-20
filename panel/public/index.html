@@ -114,6 +114,10 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
         <span>Тюнинг</span>
       </a>
+      <a href="#" class="nav-item" data-page="diag">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <span>Диагностика</span>
+      </a>
       <a href="#" class="nav-item" data-page="settings">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93l-1.41 1.41M5.34 18.66l-1.41 1.41M21 12h-2M5 12H3M19.07 19.07l-1.41-1.41M5.34 5.34L3.93 3.93M12 21v-2M12 5V3"/></svg>
         <span>Настройки</span>
@@ -575,6 +579,60 @@
             </button>
           </div>
           <div id="tuneResult" class="alert hidden"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ────── DIAGNOSTICS PAGE ────── -->
+    <div class="page" id="diagPage">
+      <div class="page-header">
+        <h1 class="page-title">Диагностика</h1>
+        <button class="btn btn-outline btn-sm" onclick="loadDiagPorts()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Обновить
+        </button>
+      </div>
+
+      <div class="card diag-card">
+        <div class="card-header">
+          <h3 class="card-title">Порты и сервисы</h3>
+        </div>
+        <div class="card-body">
+          <p class="muted">Проверка кто слушает <code>:443</code> по TCP и UDP. Если на UDP/443 висит Caddy — Hy2 не сможет запуститься.</p>
+          <pre class="log-box" id="diagPortsBox">Загружаю...</pre>
+        </div>
+      </div>
+
+      <div class="cards-row diag-logs-row">
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title"><span class="dot dot-naive"></span> Логи Caddy (Naive)</h3>
+            <button class="btn btn-outline btn-sm" onclick="loadDiagLogs('naive')">Обновить</button>
+          </div>
+          <div class="card-body">
+            <pre class="log-box log-box-tall" id="diagLogNaive">— нажмите «Обновить» —</pre>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title"><span class="dot dot-hy2"></span> Логи Hysteria2</h3>
+            <button class="btn btn-outline btn-sm" onclick="loadDiagLogs('hy2')">Обновить</button>
+          </div>
+          <div class="card-body">
+            <pre class="log-box log-box-tall" id="diagLogHy2">— нажмите «Обновить» —</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-body">
+          <h3 class="diag-help-title">Если Hy2 не запускается — частые причины:</h3>
+          <ul class="diag-help-list">
+            <li><strong>UDP/443 занят Caddy</strong> (HTTP/3). Решение: переустановите Hy2 или убедитесь что в <code>/etc/caddy/Caddyfile</code> в глобальном блоке <code>{}</code> есть <code>servers { protocols h1 h2 }</code>.</li>
+            <li><strong>Нет TLS-сертификата</strong>. Caddy выдаёт его при первом обращении — проверьте что A-запись домена указывает на этот сервер.</li>
+            <li><strong>Бинарник для другой архитектуры</strong> — посмотрите архитектуру в Дашборде.</li>
+            <li><strong>Файрволл</strong> блокирует UDP/443 — проверьте: <code>ufw status</code>.</li>
+          </ul>
         </div>
       </div>
     </div>

@@ -106,6 +106,37 @@ function goToPage(page) {
   if (page === 'dashboard') loadDashboard();
   if (page === 'users') loadUsers();
   if (page === 'tuning') loadTuning();
+  if (page === 'diag') loadDiagPorts();
+}
+
+// ─── DIAGNOSTICS ────────────────────────────────────────
+async function loadDiagPorts() {
+  const box = document.getElementById('diagPortsBox');
+  if (!box) return;
+  box.textContent = 'Загружаю...';
+  try {
+    const res = await fetch('/api/diag/ports');
+    const d = await res.json();
+    box.textContent = d.output || '(пусто)';
+  } catch (e) {
+    box.textContent = 'Ошибка: ' + e.message;
+  }
+}
+
+async function loadDiagLogs(kind) {
+  const id = kind === 'naive' ? 'diagLogNaive' : 'diagLogHy2';
+  const box = document.getElementById(id);
+  if (!box) return;
+  box.textContent = 'Загружаю...';
+  try {
+    const res = await fetch('/api/logs/' + kind + '?lines=80');
+    const d = await res.json();
+    box.textContent = (d.output || '(пусто)').slice(-8000);
+    // Скролл вниз
+    box.scrollTop = box.scrollHeight;
+  } catch (e) {
+    box.textContent = 'Ошибка: ' + e.message;
+  }
 }
 
 // ─── DASHBOARD ──────────────────────────────────────────
