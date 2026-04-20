@@ -291,8 +291,17 @@ if [[ $INSTALL_NAIVE -eq 1 ]]; then
 </head><body><div class="bar"><div class="fill"></div></div><div class="t">LOADING CONTENT</div></body></html>
 HTMLEOF
 
+  # ВАЖНО: Если Hy2 ставится параллельно — отключаем HTTP/3 в Caddy,
+  # иначе Caddy займёт UDP/443 для QUIC и Hy2 не сможет биндиться.
   {
-    printf '{\n  order forward_proxy before file_server\n}\n\n'
+    printf '{\n'
+    printf '  order forward_proxy before file_server\n'
+    if [[ $INSTALL_HY2 -eq 1 ]]; then
+      printf '  servers {\n'
+      printf '    protocols h1 h2\n'
+      printf '  }\n'
+    fi
+    printf '}\n\n'
     printf ':443, %s {\n' "${PROXY_DOMAIN}"
     printf '  tls %s\n\n' "${PROXY_EMAIL}"
     printf '  forward_proxy {\n'
@@ -733,9 +742,50 @@ PM2_STARTUP=$(pm2 startup systemd -u root --hp /root 2>/dev/null | grep "^sudo" 
 sleep 2
 
 if pm2 describe "${SERVICE_NAME}" 2>/dev/null | grep -q "online"; then
-  log_ok "Панель запущена"
+  log_ok "Панель запущена через PM2"
 else
-  log_warn "Проверьте: pm2 status && pm2 logs ${SERVICE_NAME}"
+  log_warn "PM2 не запустил панель. Пробуем systemd-fallback..."
+
+  # Fallback: создаём systemd-юнит и запускаем напрямую через Node.js
+  cat > /etc/systemd/system/panel-naive-hy2.service << SVCFALLBACKEOF
+[Unit]
+Description=Panel Naive + Hy2 by RIXXX (fallback)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${PANEL_DIR}/panel
+ExecStart=/usr/bin/node server/index.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PORT=${INTERNAL_PORT}
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SVCFALLBACKEOF
+  systemctl daemon-reload
+  systemctl enable panel-naive-hy2 >/dev/null 2>&1 || true
+  systemctl restart panel-naive-hy2 2>&1 || true
+  sleep 2
+  if systemctl is-active --quiet panel-naive-hy2; then
+    log_ok "Панель запущена через systemd (fallback)"
+  else
+    log_err "Панель не стартовала. Диагностика: journalctl -u panel-naive-hy2 -n 50"
+  fi
+fi
+
+# Финальная проверка: панель отвечает на порту 3000
+sleep 2
+if curl -fsS --max-time 5 "http://127.0.0.1:${INTERNAL_PORT}/" >/dev/null 2>&1; then
+  log_ok "Панель отвечает на http://127.0.0.1:${INTERNAL_PORT} ✓"
+else
+  log_warn "Панель НЕ отвечает на порту ${INTERNAL_PORT}!"
+  log_info "  pm2 logs ${SERVICE_NAME} --lines 30   — логи через PM2"
+  log_info "  journalctl -u panel-naive-hy2 -n 30   — логи через systemd"
+  log_info "  cd ${PANEL_DIR}/panel && node server/index.js   — запуск вручную для отладки"
 fi
 
 # ── Настройка Nginx ─────────────────────────────────────────────────────
@@ -763,9 +813,26 @@ NGINXEOF
   ln -sf /etc/nginx/sites-available/panel-naive-hy2 \
     /etc/nginx/sites-enabled/panel-naive-hy2 2>/dev/null || true
   rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
-  nginx -t >/dev/null 2>&1 && systemctl restart nginx && systemctl enable nginx >/dev/null 2>&1 \
-    || log_warn "Nginx не запустился, проверьте: nginx -t"
-  log_ok "Nginx настроен (8080 → 3000)"
+
+  # Валидация и запуск Nginx с детальным выводом ошибок
+  if nginx -t 2>&1 | tee /tmp/nginx-test.log | grep -q "successful"; then
+    systemctl restart nginx 2>&1 || log_warn "systemctl restart nginx fail"
+    systemctl enable nginx >/dev/null 2>&1 || true
+    log_ok "Nginx настроен (8080 → 3000)"
+  else
+    log_err "Nginx config invalid! Вывод nginx -t:"
+    cat /tmp/nginx-test.log
+    log_warn "Панель будет доступна напрямую на порту ${INTERNAL_PORT} (3000)"
+  fi
+
+  # Финальная проверка что 8080 действительно слушается
+  sleep 1
+  if ss -tlnp 2>/dev/null | grep -q ':8080 '; then
+    log_ok "Порт 8080 слушается ✓"
+  else
+    log_warn "Порт 8080 НЕ слушается! Проверьте: ss -tlnp | grep 8080"
+    log_warn "  Возможно nginx не запущен. Команды: systemctl status nginx; nginx -t"
+  fi
 
 elif [[ "$ACCESS_MODE" == "3" && -n "$PANEL_DOMAIN" ]]; then
   log_info "Настройка Nginx + SSL для ${PANEL_DOMAIN}..."

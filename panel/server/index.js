@@ -253,9 +253,22 @@ function writeCaddyfile(cfg) {
   const lines = (cfg.naiveUsers || [])
     .map(u => `    basic_auth ${u.username} ${u.password}`)
     .join('\n');
-  const content = `{
+
+  // КРИТИЧНО: если Hy2 тоже установлен — отключаем HTTP/3 в Caddy,
+  // иначе он займёт UDP/443 и Hy2 не запустится.
+  const disableH3 = cfg.stack && cfg.stack.hy2;
+  const globalBlock = disableH3
+    ? `{
   order forward_proxy before file_server
-}
+  servers {
+    protocols h1 h2
+  }
+}`
+    : `{
+  order forward_proxy before file_server
+}`;
+
+  const content = `${globalBlock}
 
 :443, ${cfg.domain} {
   tls ${cfg.email}
@@ -443,6 +456,52 @@ app.delete('/api/hy2/users/:username', requireAuth, async (req, res) => {
     await reloadHysteria();
   }
   res.json({ success: true });
+});
+
+// ═══════════════════════════════════════════════════════════
+//  LOGS / DIAGNOSTICS
+// ═══════════════════════════════════════════════════════════
+app.get('/api/logs/:kind', requireAuth, (req, res) => {
+  const { kind } = req.params;
+  const lines = Math.max(10, Math.min(parseInt(req.query.lines || '60', 10) || 60, 500));
+  const unitMap = {
+    naive: 'caddy',
+    hy2: 'hysteria-server',
+    panel: 'pm2-root'
+  };
+  const unit = unitMap[kind];
+  if (!unit) return res.status(400).json({ error: 'bad kind' });
+
+  if (kind === 'panel') {
+    // PM2 logs (panel сам себя)
+    const p = spawn('pm2', ['logs', 'panel-naive-hy2', '--lines', String(lines), '--nostream', '--raw']);
+    let out = '';
+    p.stdout.on('data', d => out += d.toString());
+    p.stderr.on('data', d => out += d.toString());
+    p.on('close', () => res.json({ unit: 'pm2', output: out || '(no logs)' }));
+    p.on('error', () => res.json({ unit: 'pm2', output: 'pm2 недоступен' }));
+    return;
+  }
+
+  const p = spawn('journalctl', ['-u', unit, '-n', String(lines), '--no-pager', '--output=cat']);
+  let out = '';
+  p.stdout.on('data', d => out += d.toString());
+  p.on('close', () => res.json({ unit, output: out || '(no logs)' }));
+  p.on('error', () => res.json({ unit, output: 'journalctl недоступен' }));
+});
+
+// Диагностика портов: что слушает 443/tcp и 443/udp
+app.get('/api/diag/ports', requireAuth, (req, res) => {
+  const p = spawn('bash', ['-c',
+    'echo "=== TCP/443 ==="; (ss -tlnp 2>/dev/null | grep -E ":443 " || echo "(ничего)"); ' +
+    'echo "=== UDP/443 ==="; (ss -ulnp 2>/dev/null | grep -E ":443 " || echo "(ничего)"); ' +
+    'echo "=== Caddy ==="; systemctl is-active caddy 2>/dev/null || echo unknown; ' +
+    'echo "=== Hysteria ==="; systemctl is-active hysteria-server 2>/dev/null || echo unknown'
+  ]);
+  let out = '';
+  p.stdout.on('data', d => out += d.toString());
+  p.on('close', () => res.json({ output: out }));
+  p.on('error', () => res.json({ output: 'команды недоступны' }));
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -682,7 +741,8 @@ function handleInstallBoth(ws, data) {
 
   runScript(ws, 'install_naiveproxy.sh', {
     NAIVE_DOMAIN: domain, NAIVE_EMAIL: email,
-    NAIVE_LOGIN: naiveLogin, NAIVE_PASSWORD: naivePassword
+    NAIVE_LOGIN: naiveLogin, NAIVE_PASSWORD: naivePassword,
+    WITH_HY2: '1'  // отключит HTTP/3 в Caddy → UDP/443 свободен для Hy2
   }, (codeNaive) => {
     if (codeNaive !== 0) {
       ws.send(JSON.stringify({ type: 'install_error', message: `Naive failed: ${codeNaive}` }));

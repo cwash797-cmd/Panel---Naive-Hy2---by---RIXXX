@@ -14,6 +14,7 @@ DOMAIN="${NAIVE_DOMAIN:-}"
 EMAIL="${NAIVE_EMAIL:-}"
 LOGIN="${NAIVE_LOGIN:-}"
 PASSWORD="${NAIVE_PASSWORD:-}"
+WITH_HY2="${WITH_HY2:-0}"  # 1 = отключить HTTP/3 в Caddy чтобы освободить UDP/443 для Hy2
 
 if [[ -z "$DOMAIN" || -z "$EMAIL" || -z "$LOGIN" || -z "$PASSWORD" ]]; then
   echo "ERROR: missing env NAIVE_DOMAIN/NAIVE_EMAIL/NAIVE_LOGIN/NAIVE_PASSWORD"
@@ -204,8 +205,16 @@ cat > /var/www/html/index.html << 'HTMLEOF'
 </html>
 HTMLEOF
 
+# ВАЖНО: при WITH_HY2=1 отключаем HTTP/3 чтобы UDP/443 был свободен для Hysteria2.
 {
-  printf '{\n  order forward_proxy before file_server\n}\n\n'
+  printf '{\n'
+  printf '  order forward_proxy before file_server\n'
+  if [[ "$WITH_HY2" == "1" ]]; then
+    printf '  servers {\n'
+    printf '    protocols h1 h2\n'
+    printf '  }\n'
+  fi
+  printf '}\n\n'
   printf ':443, %s {\n' "$DOMAIN"
   printf '  tls %s\n\n' "$EMAIL"
   printf '  forward_proxy {\n'
