@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Panel Naive + Hy2 by RIXXX</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════ LOGIN PAGE ═══ -->
+<div id="loginPage" class="login-page hidden">
+  <div class="login-bg">
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+    <div class="bg-orb orb-3"></div>
+  </div>
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="logo-icon">
+        <img src="/assets/logo.png" alt="Logo"
+             style="width:36px;height:36px;object-fit:contain;border-radius:6px;"
+             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div style="display:none;align-items:center;justify-content:center;">
+          <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+            <circle cx="18" cy="18" r="17" stroke="url(#grad1)" stroke-width="2"/>
+            <path d="M10 18C10 13.58 13.58 10 18 10C22.42 10 26 13.58 26 18" stroke="url(#grad1)" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="18" cy="18" r="4" fill="url(#grad1)"/>
+            <defs>
+              <linearGradient id="grad1" x1="0" y1="0" x2="36" y2="36" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#7C3AED"/>
+                <stop offset="100%" stop-color="#3B82F6"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+      </div>
+      <div>
+        <div class="logo-title">Naive + Hy2</div>
+        <div class="logo-sub">Panel by RIXXX</div>
+      </div>
+    </div>
+    <h2 class="login-heading">Добро пожаловать</h2>
+    <p class="login-desc">Войдите в панель управления</p>
+    <div id="loginError" class="alert alert-error hidden"></div>
+    <form id="loginForm">
+      <div class="form-group">
+        <label class="form-label">Логин</label>
+        <input type="text" id="loginUsername" class="form-input" placeholder="admin" autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Пароль</label>
+        <input type="password" id="loginPassword" class="form-input" placeholder="••••••••" autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn btn-shiny btn-full">
+        <span class="btn-text">Войти</span>
+        <span class="btn-loader hidden">
+          <svg class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+          </svg>
+        </span>
+      </button>
+    </form>
+    <div class="login-hint">По умолчанию: admin / admin</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ MAIN APP ═══ -->
+<div id="app" class="app hidden">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-icon small">
+        <img src="/assets/logo.png" alt="Logo"
+             style="width:24px;height:24px;object-fit:contain;border-radius:4px;"
+             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div style="display:none;align-items:center;justify-content:center;">
+          <svg width="24" height="24" viewBox="0 0 36 36" fill="none">
+            <circle cx="18" cy="18" r="17" stroke="url(#grad2)" stroke-width="2"/>
+            <path d="M10 18C10 13.58 13.58 10 18 10C22.42 10 26 13.58 26 18" stroke="url(#grad2)" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="18" cy="18" r="4" fill="url(#grad2)"/>
+            <defs>
+              <linearGradient id="grad2" x1="0" y1="0" x2="36" y2="36" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#7C3AED"/>
+                <stop offset="100%" stop-color="#3B82F6"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+      </div>
+      <div>
+        <div class="sidebar-title">Naive + Hy2</div>
+        <div class="sidebar-sub">by RIXXX</div>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a href="#" class="nav-item active" data-page="dashboard">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        <span>Дашборд</span>
+      </a>
+      <a href="#" class="nav-item" data-page="install">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+        <span>Установка</span>
+      </a>
+      <a href="#" class="nav-item" data-page="users">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span>Пользователи</span>
+      </a>
+      <a href="#" class="nav-item" data-page="tuning">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        <span>Тюнинг</span>
+      </a>
+      <a href="#" class="nav-item" data-page="settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93l-1.41 1.41M5.34 18.66l-1.41 1.41M21 12h-2M5 12H3M19.07 19.07l-1.41-1.41M5.34 5.34L3.93 3.93M12 21v-2M12 5V3"/></svg>
+        <span>Настройки</span>
+      </a>
+    </nav>
+
+    <div class="sidebar-bottom">
+      <div class="user-info">
+        <div class="user-avatar" id="sidebarUserAvatar">A</div>
+        <div>
+          <div class="user-name" id="sidebarUsername">admin</div>
+          <div class="user-role">Administrator</div>
+        </div>
+      </div>
+      <button class="btn-icon logout-btn" id="logoutBtn" title="Выйти">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+
+    <!-- ────── DASHBOARD PAGE ────── -->
+    <div class="page active" id="dashboardPage">
+      <div class="page-header">
+        <h1 class="page-title">Дашборд</h1>
+        <div class="page-actions">
+          <button class="btn btn-outline btn-sm" id="refreshStatusBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Обновить
+          </button>
+        </div>
+      </div>
+
+      <!-- Общая инфа -->
+      <div class="stats-grid" id="statsGrid">
+        <div class="stat-card">
+          <div class="stat-icon domain-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          </div>
+          <div class="stat-body">
+            <div class="stat-label">Домен</div>
+            <div class="stat-value mono" id="serverDomain">—</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon ip-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          </div>
+          <div class="stat-body">
+            <div class="stat-label">IP сервера</div>
+            <div class="stat-value mono" id="serverIp">—</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon users-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </div>
+          <div class="stat-body">
+            <div class="stat-label">Всего пользователей</div>
+            <div class="stat-value" id="totalUsers">0</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon arch-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+          </div>
+          <div class="stat-body">
+            <div class="stat-label">Архитектура</div>
+            <div class="stat-value mono" id="serverArch">—</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Карточки сервисов -->
+      <div class="cards-row">
+        <!-- NaiveProxy -->
+        <div class="card service-card" id="naiveCard">
+          <div class="card-header">
+            <div class="card-title-wrap">
+              <div class="service-icon naive">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg>
+              </div>
+              <div>
+                <h3 class="card-title">NaiveProxy</h3>
+                <div class="card-subtitle">TCP/443 • Caddy</div>
+              </div>
+            </div>
+            <div class="service-status" id="naiveStatusBadge"><span class="dot dot-gray"></span> —</div>
+          </div>
+          <div class="card-body">
+            <div class="not-installed-msg" id="naiveNotInstalled">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              <p>NaiveProxy ещё не установлен</p>
+              <button class="btn btn-shiny" onclick="goToPage('install'); setTimeout(() => switchInstallTab('naive'), 50)">Установить</button>
+            </div>
+            <div class="service-installed hidden" id="naiveInstalled">
+              <div class="service-stats">
+                <div class="service-stat">
+                  <div class="service-stat-label">Пользователей</div>
+                  <div class="service-stat-val" id="naiveUsersCount">0</div>
+                </div>
+              </div>
+              <div class="service-btns">
+                <button class="btn btn-success btn-sm" onclick="serviceAction('naive', 'start')">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                  Старт
+                </button>
+                <button class="btn btn-warning btn-sm" onclick="serviceAction('naive', 'restart')">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                  Рестарт
+                </button>
+                <button class="btn btn-danger btn-sm" onclick="serviceAction('naive', 'stop')">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+                  Стоп
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hysteria2 -->
+        <div class="card service-card" id="hy2Card">
+          <div class="card-header">
+            <div class="card-title-wrap">
+              <div class="service-icon hy2">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+              </div>
+              <div>
+                <h3 class="card-title">Hysteria2</h3>
+                <div class="card-subtitle">UDP/443 • QUIC</div>
+              </div>
+            </div>
+            <div class="service-status" id="hy2StatusBadge"><span class="dot dot-gray"></span> —</div>
+          </div>
+          <div class="card-body">
+            <div class="not-installed-msg" id="hy2NotInstalled">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              <p>Hysteria2 ещё не установлен</p>
+              <button class="btn btn-shiny" onclick="goToPage('install'); setTimeout(() => switchInstallTab('hy2'), 50)">Установить</button>
+            </div>
+            <div class="service-installed hidden" id="hy2Installed">
+              <div class="service-stats">
+                <div class="service-stat">
+                  <div class="service-stat-label">Пользователей</div>
+                  <div class="service-stat-val" id="hy2UsersCount">0</div>
+                </div>
+              </div>
+              <div class="service-btns">
+                <button class="btn btn-success btn-sm" onclick="serviceAction('hy2', 'start')">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                  Старт
+                </button>
+                <button class="btn btn-warning btn-sm" onclick="serviceAction('hy2', 'restart')">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                  Рестарт
+                </button>
+                <button class="btn btn-danger btn-sm" onclick="serviceAction('hy2', 'stop')">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+                  Стоп
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Быстрые ссылки -->
+      <div class="card quick-links-card">
+        <div class="card-header">
+          <h3 class="card-title">Быстрые ссылки подключения</h3>
+        </div>
+        <div class="card-body">
+          <div class="quick-link-empty" id="quickLinksEmpty">
+            <p>Установите прокси для получения ссылок</p>
+          </div>
+          <div id="quickLinksList" class="hidden"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ────── INSTALL PAGE ────── -->
+    <div class="page" id="installPage">
+      <div class="page-header">
+        <h1 class="page-title">Установка прокси</h1>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="naive" onclick="switchInstallTab('naive')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg>
+          NaiveProxy
+        </button>
+        <button class="tab-btn" data-tab="hy2" onclick="switchInstallTab('hy2')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+          Hysteria2
+        </button>
+        <button class="tab-btn" data-tab="both" onclick="switchInstallTab('both')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 6 6 1-4.5 4.5 1 6.5L12 17l-5.5 3 1-6.5L3 9l6-1z"/></svg>
+          Оба сразу <span class="badge-recommended">рекомендуется</span>
+        </button>
+      </div>
+
+      <div class="install-layout">
+        <div class="card install-form-card">
+          <div class="card-header">
+            <h3 class="card-title" id="installFormTitle">Параметры NaiveProxy</h3>
+            <div class="card-badge" id="installStepBadge">Шаг 1 из 1</div>
+          </div>
+          <div class="card-body">
+            <div id="installAlert" class="alert hidden"></div>
+
+            <!-- Общие поля -->
+            <div class="form-grid">
+              <div class="form-group">
+                <label class="form-label">
+                  Поддомен (домен)
+                  <span class="form-hint">A-запись должна указывать на IP сервера</span>
+                </label>
+                <input type="text" id="installDomain" class="form-input" placeholder="vpn.yourdomain.com">
+              </div>
+              <div class="form-group">
+                <label class="form-label">
+                  Email для Let's Encrypt
+                  <span class="form-hint">Для SSL сертификата</span>
+                </label>
+                <input type="email" id="installEmail" class="form-input" placeholder="you@email.com">
+              </div>
+            </div>
+
+            <!-- Naive-специфичные поля -->
+            <div id="naiveFields" class="form-grid">
+              <div class="form-group">
+                <label class="form-label">
+                  Логин Naive
+                  <span class="form-hint">Первый пользователь NaiveProxy</span>
+                </label>
+                <input type="text" id="installNaiveLogin" class="form-input" placeholder="mylogin">
+              </div>
+              <div class="form-group">
+                <label class="form-label">
+                  Пароль Naive
+                  <span class="form-hint">Минимум 8 символов</span>
+                </label>
+                <div class="input-group">
+                  <input type="text" id="installNaivePassword" class="form-input" placeholder="Будет сгенерирован">
+                  <button type="button" class="btn btn-outline btn-gen" onclick="genPwdInto('installNaivePassword')" title="Сгенерировать">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="2" y="2" width="20" height="20" rx="4"/>
+                      <circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none"/>
+                      <circle cx="16" cy="8" r="1.5" fill="currentColor" stroke="none"/>
+                      <circle cx="8" cy="16" r="1.5" fill="currentColor" stroke="none"/>
+                      <circle cx="16" cy="16" r="1.5" fill="currentColor" stroke="none"/>
+                      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Hy2-специфичные поля -->
+            <div id="hy2Fields" class="form-grid hidden">
+              <div class="form-group full-width">
+                <label class="form-label">
+                  Пароль Hysteria2
+                  <span class="form-hint">Одиночный пароль (доп. юзеров добавите потом)</span>
+                </label>
+                <div class="input-group">
+                  <input type="text" id="installHy2Password" class="form-input" placeholder="Будет сгенерирован">
+                  <button type="button" class="btn btn-outline btn-gen" onclick="genPwdInto('installHy2Password')" title="Сгенерировать">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="2" y="2" width="20" height="20" rx="4"/>
+                      <circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none"/>
+                      <circle cx="16" cy="8" r="1.5" fill="currentColor" stroke="none"/>
+                      <circle cx="8" cy="16" r="1.5" fill="currentColor" stroke="none"/>
+                      <circle cx="16" cy="16" r="1.5" fill="currentColor" stroke="none"/>
+                      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="install-note" id="installNote">
+              <strong>ℹ NaiveProxy</strong> — TCP на 443 порту. Маскируется под обычный HTTPS-сайт.
+            </div>
+
+            <div class="form-actions">
+              <button class="btn btn-shiny btn-lg" id="startInstallBtn" onclick="startInstall()">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+                Начать установку
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Progress Panel -->
+        <div class="card install-progress-card">
+          <div class="card-header">
+            <h3 class="card-title">Прогресс установки</h3>
+            <div class="progress-percent" id="progressPercent">0%</div>
+          </div>
+          <div class="card-body">
+            <div class="progress-bar-wrap">
+              <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+            </div>
+            <div class="install-steps">
+              <div class="install-step" id="step-init" data-step="init"><div class="step-dot"></div><div class="step-label">Инициализация</div></div>
+              <div class="install-step" id="step-update" data-step="update"><div class="step-dot"></div><div class="step-label">Обновление системы</div></div>
+              <div class="install-step" id="step-bbr" data-step="bbr"><div class="step-dot"></div><div class="step-label">BBR + UDP тюнинг</div></div>
+              <div class="install-step" id="step-firewall" data-step="firewall"><div class="step-dot"></div><div class="step-label">Файрволл</div></div>
+              <div class="install-step" id="step-dl" data-step="dl"><div class="step-dot"></div><div class="step-label">Загрузка бинарников</div></div>
+              <div class="install-step" id="step-build" data-step="build"><div class="step-dot"></div><div class="step-label">Сборка / настройка</div></div>
+              <div class="install-step" id="step-config" data-step="config"><div class="step-dot"></div><div class="step-label">Конфигурация</div></div>
+              <div class="install-step" id="step-service" data-step="service"><div class="step-dot"></div><div class="step-label">Systemd сервис</div></div>
+              <div class="install-step" id="step-start" data-step="start"><div class="step-dot"></div><div class="step-label">Запуск</div></div>
+              <div class="install-step" id="step-done" data-step="done"><div class="step-dot"></div><div class="step-label">Готово!</div></div>
+            </div>
+
+            <div class="terminal-wrap">
+              <div class="terminal-header">
+                <span class="terminal-dot red"></span>
+                <span class="terminal-dot yellow"></span>
+                <span class="terminal-dot green"></span>
+                <span class="terminal-title">Лог установки</span>
+              </div>
+              <div class="terminal" id="installLog"></div>
+            </div>
+
+            <div class="install-done hidden" id="installDone">
+              <div class="done-icon">✅</div>
+              <h3>Установка завершена!</h3>
+              <p>Прокси успешно настроены и запущены</p>
+              <div class="done-links-wrap" id="doneLinksWrap"></div>
+              <button class="btn btn-shiny" onclick="goToPage('dashboard')">На дашборд</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ────── USERS PAGE ────── -->
+    <div class="page" id="usersPage">
+      <div class="page-header">
+        <h1 class="page-title">Пользователи прокси</h1>
+      </div>
+
+      <div class="tabs">
+        <button class="tab-btn active" data-utab="naive" onclick="switchUsersTab('naive')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg>
+          NaiveProxy <span class="tab-count" id="naiveTabCount">0</span>
+        </button>
+        <button class="tab-btn" data-utab="hy2" onclick="switchUsersTab('hy2')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+          Hysteria2 <span class="tab-count" id="hy2TabCount">0</span>
+        </button>
+      </div>
+
+      <div class="users-actions">
+        <button class="btn btn-shiny" onclick="showAddUserModal()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Добавить пользователя
+        </button>
+      </div>
+
+      <div class="card">
+        <div class="card-body">
+          <div class="empty-state" id="emptyUsers" style="display:none">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            <p>Пользователи не добавлены</p>
+            <button class="btn btn-shiny" onclick="showAddUserModal()">Добавить первого</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="usersTable" style="display:none">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Логин</th>
+                  <th>Пароль</th>
+                  <th>Ссылка подключения</th>
+                  <th>Создан</th>
+                  <th>Действия</th>
+                </tr>
+              </thead>
+              <tbody id="usersTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ────── TUNING PAGE ────── -->
+    <div class="page" id="tuningPage">
+      <div class="page-header">
+        <h1 class="page-title">Сетевой тюнинг</h1>
+        <button class="btn btn-outline btn-sm" onclick="loadTuning()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Обновить
+        </button>
+      </div>
+
+      <div class="cards-row">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-wrap">
+              <div class="service-icon naive">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              </div>
+              <div>
+                <h3 class="card-title">TCP / BBR</h3>
+                <div class="card-subtitle">для NaiveProxy</div>
+              </div>
+            </div>
+            <div class="service-status" id="bbrBadge"><span class="dot dot-gray"></span> —</div>
+          </div>
+          <div class="card-body">
+            <div class="info-rows">
+              <div class="info-row"><span class="info-key">Congestion control</span><span class="info-val mono" id="ccVal">—</span></div>
+              <div class="info-row"><span class="info-key">Queue discipline</span><span class="info-val mono" id="qdiscVal">—</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-wrap">
+              <div class="service-icon hy2">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+              </div>
+              <div>
+                <h3 class="card-title">UDP буферы</h3>
+                <div class="card-subtitle">для Hysteria2</div>
+              </div>
+            </div>
+            <div class="service-status" id="udpBadge"><span class="dot dot-gray"></span> —</div>
+          </div>
+          <div class="card-body">
+            <div class="info-rows">
+              <div class="info-row"><span class="info-key">rmem_max</span><span class="info-val mono" id="rmemVal">—</span></div>
+              <div class="info-row"><span class="info-key">wmem_max</span><span class="info-val mono" id="wmemVal">—</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card tuning-action-card">
+        <div class="card-body">
+          <h3 class="tuning-title">Применить оптимизации</h3>
+          <p class="tuning-desc">
+            Скрипт настроит <code>net.ipv4.tcp_congestion_control=bbr</code>, <code>net.core.default_qdisc=fq</code>,
+            UDP-буферы <code>rmem_max/wmem_max=16MB</code> и TCP Fast Open. Параметры сохранятся в <code>/etc/sysctl.d/99-rixxx-tune.conf</code>
+            и применятся сразу.
+          </p>
+          <div class="form-actions form-actions-center">
+            <button class="btn btn-shiny btn-lg" id="applyTuneBtn" onclick="applyTuning()">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+              Применить тюнинг
+            </button>
+          </div>
+          <div id="tuneResult" class="alert hidden"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ────── SETTINGS PAGE ────── -->
+    <div class="page" id="settingsPage">
+      <div class="page-header">
+        <h1 class="page-title">Настройки</h1>
+      </div>
+      <div class="settings-grid">
+
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">Смена пароля панели</h3></div>
+          <div class="card-body">
+            <div id="pwdChangeAlert" class="alert hidden"></div>
+            <div class="form-group">
+              <label class="form-label">Текущий пароль</label>
+              <input type="password" id="currentPwd" class="form-input" placeholder="••••••••" autocomplete="current-password">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Новый пароль</label>
+              <input type="password" id="newPwd" class="form-input" placeholder="••••••••" autocomplete="new-password">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Подтвердите пароль</label>
+              <input type="password" id="confirmPwd" class="form-input" placeholder="••••••••" autocomplete="new-password">
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-shiny" onclick="changePassword()">Сохранить пароль</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">Информация о панели</h3></div>
+          <div class="card-body">
+            <div class="info-rows">
+              <div class="info-row"><span class="info-key">Версия</span><span class="info-val">1.0.0</span></div>
+              <div class="info-row"><span class="info-key">Автор</span><span class="info-val">RIXXX</span></div>
+              <div class="info-row"><span class="info-key">Стек</span><span class="info-val">Node.js + Caddy + Hysteria2</span></div>
+              <div class="info-row"><span class="info-key">GitHub</span><a href="https://github.com/cwash797-cmd" target="_blank" class="info-val link">cwash797-cmd</a></div>
+            </div>
+            <div class="support-btns">
+              <a href="https://app.lava.top/2107724612?tabId=donate" target="_blank" class="btn btn-shiny btn-full">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21C12 21 3 13.5 3 8a9 9 0 0 1 18 0c0 5.5-9 13-9 13z"/><circle cx="12" cy="8" r="2"/></svg>
+                Поддержать автора ❤️
+              </a>
+              <a href="https://t.me/russian_paradice_vpn" target="_blank" class="btn btn-tg btn-full">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+                Подписывайся в Telegram
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <!-- Клиенты -->
+        <div class="card settings-clients-card">
+          <div class="card-header"><h3 class="card-title">Клиентские приложения</h3></div>
+          <div class="card-body">
+            <div class="clients-list">
+              <!-- iOS -->
+              <div class="client-item">
+                <div class="client-platform ios">iOS</div>
+                <div class="client-name">Karing <span class="client-tag">Naive + Hy2</span></div>
+                <a class="client-link" href="https://apps.apple.com/app/karing/id6472431552" target="_blank">App Store ↗</a>
+              </div>
+              <!-- Android -->
+              <div class="client-item">
+                <div class="client-platform android">Android</div>
+                <div class="client-name">NekoBox <span class="client-tag">Naive + Hy2</span></div>
+                <a class="client-link" href="https://github.com/MatsuriDayo/NekoBoxForAndroid/releases" target="_blank">GitHub ↗</a>
+              </div>
+              <div class="client-item">
+                <div class="client-platform android">Android</div>
+                <div class="client-name">Karing <span class="client-tag">Naive + Hy2</span></div>
+                <a class="client-link" href="https://github.com/KaringX/karing/releases" target="_blank">GitHub ↗</a>
+              </div>
+              <!-- Windows -->
+              <div class="client-item">
+                <div class="client-platform windows">Windows</div>
+                <div class="client-name">Karing <span class="client-tag">Naive + Hy2</span></div>
+                <a class="client-link" href="https://github.com/KaringX/karing/releases" target="_blank">GitHub ↗</a>
+              </div>
+              <div class="client-item">
+                <div class="client-platform windows">Windows</div>
+                <div class="client-name">NekoRay <span class="client-tag">Naive + Hy2</span></div>
+                <a class="client-link" href="https://github.com/MatsuriDayo/nekoray/releases" target="_blank">GitHub ↗</a>
+              </div>
+              <div class="client-item">
+                <div class="client-platform windows">Windows</div>
+                <div class="client-name">Hiddify <span class="client-tag">Hy2</span></div>
+                <a class="client-link" href="https://github.com/hiddify/hiddify-app/releases" target="_blank">GitHub ↗</a>
+              </div>
+              <div class="client-item">
+                <div class="client-platform windows">Windows</div>
+                <div class="client-name">v2rayN <span class="client-tag">Naive + Hy2</span></div>
+                <a class="client-link" href="https://github.com/2dust/v2rayN/releases" target="_blank">GitHub ↗</a>
+              </div>
+              <!-- Linux -->
+              <div class="client-item">
+                <div class="client-platform linux">Linux</div>
+                <div class="client-name">hysteria CLI <span class="client-tag">Hy2</span></div>
+                <a class="client-link" href="https://github.com/apernet/hysteria/releases" target="_blank">GitHub ↗</a>
+              </div>
+            </div>
+            <div class="client-note">
+              Naive: <code>naive+https://LOGIN:PASS@domain.com:443</code><br>
+              Hy2: <code>hysteria2://PASS@domain.com:443?sni=domain.com</code>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ═══════════════════════════════ MODALS ═══ -->
+<div class="modal-overlay hidden" id="addUserModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="addUserModalTitle">Добавить пользователя</h3>
+      <button class="modal-close" onclick="closeModal('addUserModal')">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div id="addUserAlert" class="alert hidden"></div>
+      <div class="form-group">
+        <label class="form-label">Логин</label>
+        <input type="text" id="newUserLogin" class="form-input" placeholder="username" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Пароль</label>
+        <div class="input-group">
+          <input type="text" id="newUserPassword" class="form-input" placeholder="password" autocomplete="off">
+          <button type="button" class="btn btn-outline btn-gen" onclick="genPwdInto('newUserPassword')" title="Сгенерировать пароль">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="2" width="20" height="20" rx="4"/>
+              <circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none"/>
+              <circle cx="16" cy="8" r="1.5" fill="currentColor" stroke="none"/>
+              <circle cx="8" cy="16" r="1.5" fill="currentColor" stroke="none"/>
+              <circle cx="16" cy="16" r="1.5" fill="currentColor" stroke="none"/>
+              <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('addUserModal')">Отмена</button>
+      <button class="btn btn-shiny" onclick="addUser()">Добавить</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="deleteUserModal">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h3>Удалить пользователя</h3>
+      <button class="modal-close" onclick="closeModal('deleteUserModal')">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <p>Удалить пользователя <strong id="deleteUserName"></strong>?<br>Это действие нельзя отменить.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('deleteUserModal')">Отмена</button>
+      <button class="btn btn-danger" onclick="confirmDeleteUser()">Удалить</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/js/app.js"></script>
+</body>
+</html>
