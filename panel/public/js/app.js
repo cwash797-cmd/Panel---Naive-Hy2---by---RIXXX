@@ -107,6 +107,7 @@ function goToPage(page) {
   if (page === 'users') loadUsers();
   if (page === 'tuning') loadTuning();
   if (page === 'diag') loadDiagPorts();
+  if (page === 'bypass') loadBypass();
 }
 
 // ─── DIAGNOSTICS ────────────────────────────────────────
@@ -521,8 +522,10 @@ async function loadUsers() {
             : `hysteria2://${encodeURIComponent(u.username)}:${encodeURIComponent(u.password)}@${status.domain}:443?sni=${status.domain}&insecure=0#${encodeURIComponent(u.username)}`)
         : '';
       const date = u.createdAt ? new Date(u.createdAt).toLocaleDateString('ru') : '—';
+      const expireCell = formatExpireCell(u);
+      const rowClass = u.expired ? 'row-expired' : '';
       tbody.innerHTML += `
-        <tr>
+        <tr class="${rowClass}">
           <td>${i + 1}</td>
           <td class="td-login">${escapeHtml(u.username)}</td>
           <td class="td-pwd">${escapeHtml(u.password)}</td>
@@ -530,10 +533,14 @@ async function loadUsers() {
             ${link ? `<span style="cursor:pointer" onclick="copyText('${escapeHtml(link)}')" title="Скопировать">${escapeHtml(link)}</span>` : '<span style="color:var(--text-muted)">Сервер не установлен</span>'}
           </td>
           <td>${date}</td>
+          <td class="td-expire">${expireCell}</td>
           <td class="td-actions">
             ${link ? `<button class="btn btn-outline btn-sm" onclick="copyText('${escapeHtml(link)}')" title="Копировать">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             </button>` : ''}
+            <button class="btn btn-outline btn-sm" onclick="showExtendModal('${currentUsersTab}', '${escapeHtml(u.username)}')" title="Продлить / изменить срок">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
+            </button>
             <button class="btn btn-danger btn-sm" onclick="showDeleteModal('${currentUsersTab}', '${escapeHtml(u.username)}')">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
             </button>
@@ -551,6 +558,8 @@ function showAddUserModal() {
     isHy2 ? 'Добавить Hy2 пользователя' : 'Добавить Naive пользователя';
   document.getElementById('newUserLogin').value = '';
   genPwdInto('newUserPassword');
+  const exp = document.getElementById('newUserExpire');
+  if (exp) exp.value = '7';
   document.getElementById('addUserAlert').classList.add('hidden');
   openModal('addUserModal');
 }
@@ -558,6 +567,7 @@ function showAddUserModal() {
 async function addUser() {
   const username = document.getElementById('newUserLogin').value.trim();
   const password = document.getElementById('newUserPassword').value.trim();
+  const expireDays = parseInt(document.getElementById('newUserExpire')?.value || '0', 10);
   const alertEl = document.getElementById('addUserAlert');
 
   if (!username || !password) { showAlert(alertEl, 'Введите логин и пароль', 'error'); return; }
@@ -566,18 +576,78 @@ async function addUser() {
   try {
     const res = await fetch(`/api/${currentUsersTab}/users`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
+      body: JSON.stringify({ username, password, expireDays })
     });
     const data = await res.json();
     if (data.success) {
       closeModal('addUserModal');
-      showToast(`✅ ${username} добавлен`, 'success');
+      const suffix = expireDays > 0 ? ` (${expireDays} дн.)` : ' (бессрочно)';
+      showToast(`✅ ${username} добавлен${suffix}`, 'success');
       loadUsers();
     } else {
       showAlert(alertEl, data.message || 'Ошибка', 'error');
     }
   } catch {
     showAlert(alertEl, 'Ошибка соединения', 'error');
+  }
+}
+
+// ─── EXPIRE helpers ─────────────────────────────────────
+function formatExpireCell(u) {
+  if (!u.expiresAt) return '<span class="badge-muted">Бессрочно</span>';
+  if (u.expired)    return '<span class="badge-danger">Истёк</span>';
+  const sec = u.remainingSec;
+  if (sec == null) return '<span class="badge-muted">—</span>';
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  let label;
+  if (d > 0)      label = `${d} д ${h} ч`;
+  else if (h > 0) label = `${h} ч ${m} м`;
+  else            label = `${m} мин`;
+  const cls = (sec < 86400) ? 'badge-warn' : 'badge-ok';
+  const dt = new Date(u.expiresAt).toLocaleString('ru');
+  return `<span class="${cls}" title="${dt}">${label}</span>`;
+}
+
+let extendUserTarget = null;
+function showExtendModal(kind, username) {
+  extendUserTarget = { kind, username };
+  document.getElementById('extendUserName').textContent = `${kind === 'naive' ? 'Naive' : 'Hy2'}: ${username}`;
+  // Подгрузим текущее значение expiresAt
+  fetch(`/api/${kind}/users`).then(r => r.json()).then(({ users }) => {
+    const u = (users || []).find(x => x.username === username);
+    const cur = document.getElementById('extendUserCurrent');
+    if (u && u.expiresAt) {
+      cur.textContent = `Текущий срок: до ${new Date(u.expiresAt).toLocaleString('ru')}` + (u.expired ? ' (истёк)' : '');
+    } else {
+      cur.textContent = 'Текущий срок: бессрочно';
+    }
+  }).catch(() => {});
+  document.getElementById('extendUserDays').value = '7';
+  openModal('extendUserModal');
+}
+
+async function confirmExtendUser() {
+  if (!extendUserTarget) return;
+  const { kind, username } = extendUserTarget;
+  const expireDays = parseInt(document.getElementById('extendUserDays').value || '0', 10);
+  try {
+    const res = await fetch(`/api/${kind}/users/${encodeURIComponent(username)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expireDays })
+    });
+    const data = await res.json();
+    if (data.success) {
+      closeModal('extendUserModal');
+      showToast(expireDays > 0 ? `Срок для ${username} продлён (${expireDays} дн.)` : `${username} теперь бессрочный`, 'success');
+      extendUserTarget = null;
+      loadUsers();
+    } else {
+      showToast(data.message || 'Ошибка', 'error');
+    }
+  } catch {
+    showToast('Ошибка соединения', 'error');
   }
 }
 
@@ -659,6 +729,87 @@ async function applyTuning() {
     btn.disabled = false;
     btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> Применить тюнинг`;
   }
+}
+
+// ─── BYPASS (RU direct) ───────────────────────────────
+let _bypassState = { enabled: false };
+async function loadBypass() {
+  try {
+    const r = await fetch('/api/bypass');
+    const d = await r.json();
+    _bypassState = d;
+    const badge = document.getElementById('bypassBadge');
+    if (d.enabled && d.count > 0) {
+      badge.innerHTML = '<span class="dot dot-green"></span> Активен';
+    } else if (d.count > 0) {
+      badge.innerHTML = '<span class="dot dot-gray"></span> Выключен';
+    } else {
+      badge.innerHTML = '<span class="dot dot-gray"></span> Не загружен';
+    }
+    document.getElementById('bypassCount').textContent   = d.count || 0;
+    document.getElementById('bypassUpdated').textContent = d.updatedAt ? new Date(d.updatedAt).toLocaleString('ru') : '—';
+    document.getElementById('bypassSource').textContent  = d.source || 'для Hysteria2 (UDP)';
+    document.getElementById('bypassPreview').textContent = (d.preview || []).join('\n') || '— список пуст —';
+    document.getElementById('bypassToggleBtn').textContent = d.enabled ? 'Выключить' : 'Включить';
+  } catch {
+    showToast('Ошибка загрузки bypass', 'error');
+  }
+}
+
+async function saveBypass(enable) {
+  const raw = document.getElementById('bypassInput').value.trim();
+  const resEl = document.getElementById('bypassResult');
+  if (!raw) { showAlert(resEl, 'Вставьте JSON или список CIDR', 'error'); return; }
+
+  let payload = { enabled: enable, source: document.getElementById('bypassSourceInput').value.trim() };
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) payload.cidrs = parsed;
+    else payload.json = parsed;
+  } catch {
+    // not JSON — пробуем как plain list (по строке)
+    payload.cidrs = raw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  }
+
+  try {
+    const r = await fetch('/api/bypass', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const d = await r.json();
+    if (d.success) {
+      showAlert(resEl, `✅ Сохранено: ${d.count} сетей, ${d.enabled ? 'ВКЛ' : 'выкл'}.`, 'success');
+      document.getElementById('bypassInput').value = '';
+      loadBypass();
+    } else {
+      showAlert(resEl, 'Ошибка: ' + (d.message || 'unknown'), 'error');
+    }
+  } catch {
+    showAlert(resEl, 'Ошибка соединения', 'error');
+  }
+}
+
+async function toggleBypass() {
+  try {
+    const r = await fetch('/api/bypass', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !_bypassState.enabled })
+    });
+    const d = await r.json();
+    if (d.success) {
+      showToast(d.enabled ? 'Bypass включён' : 'Bypass выключен', 'success');
+      loadBypass();
+    }
+  } catch { showToast('Ошибка', 'error'); }
+}
+
+async function clearBypass() {
+  if (!confirm('Очистить список bypass и выключить?')) return;
+  try {
+    const r = await fetch('/api/bypass', { method: 'DELETE' });
+    const d = await r.json();
+    if (d.success) { showToast('Список очищен', 'success'); loadBypass(); }
+  } catch { showToast('Ошибка', 'error'); }
 }
 
 // ─── SETTINGS ───────────────────────────────────────────
