@@ -446,30 +446,53 @@ masquerade:
 HYCFGEOF
 
   if [[ "$HY_TLS_MODE" == "caddy" ]]; then
-    # Ждём пока Caddy получит сертификат (до 60 сек)
-    CADDY_CERT_DIR="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${PROXY_DOMAIN}"
-    log_info "Ждём сертификат от Caddy..."
-    for i in $(seq 1 30); do
-      if [[ -f "${CADDY_CERT_DIR}/${PROXY_DOMAIN}.crt" ]]; then
-        log_ok "Сертификат Caddy найден (${i}с)"
+    # Caddy может хранить cert в двух местах — проверяем оба
+    CADDY_CERT_BASE_NEW="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${PROXY_DOMAIN}"
+    CADDY_CERT_BASE_OLD="/root/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${PROXY_DOMAIN}"
+    CADDY_CERT_DIR=""
+
+    log_info "Ждём сертификат от Caddy (до 90с)..."
+    for i in $(seq 1 45); do
+      if [[ -f "${CADDY_CERT_BASE_NEW}/${PROXY_DOMAIN}.crt" ]]; then
+        CADDY_CERT_DIR="${CADDY_CERT_BASE_NEW}"
+        log_ok "Сертификат найден (${i}х2с) — /var/lib/caddy"
+        break
+      elif [[ -f "${CADDY_CERT_BASE_OLD}/${PROXY_DOMAIN}.crt" ]]; then
+        CADDY_CERT_DIR="${CADDY_CERT_BASE_OLD}"
+        log_ok "Сертификат найден (${i}х2с) — /root/.local"
         break
       fi
       sleep 2
     done
 
-    cat >> /etc/hysteria/config.yaml << HYTLSEOF
+    if [[ -z "$CADDY_CERT_DIR" ]]; then
+      log_warn "Сертификат Caddy не найден за 90с — переключаемся на ACME для Hy2"
+      log_info "Это нормально при первом запуске если DNS ещё не прогрессировал."
+      log_info "Убедитесь что A-запись домена указывает на ${SERVER_IP}"
+      cat >> /etc/hysteria/config.yaml << HYACMEFBEOF
+acme:
+  domains:
+    - ${PROXY_DOMAIN}
+  email: ${PROXY_EMAIL}
+  ca: letsencrypt
+  listenHost: 0.0.0.0
+HYACMEFBEOF
+    else
+      # Даём Hy2 доступ к файлам сертификата
+      chmod -R 755 "$(dirname "$CADDY_CERT_DIR")" 2>/dev/null || true
+      chmod 644 "${CADDY_CERT_DIR}/${PROXY_DOMAIN}.crt" 2>/dev/null || true
+      chmod 640 "${CADDY_CERT_DIR}/${PROXY_DOMAIN}.key" 2>/dev/null || true
+
+      cat >> /etc/hysteria/config.yaml << HYTLSEOF
 tls:
   cert: ${CADDY_CERT_DIR}/${PROXY_DOMAIN}.crt
-  key: ${CADDY_CERT_DIR}/${PROXY_DOMAIN}.key
+  key:  ${CADDY_CERT_DIR}/${PROXY_DOMAIN}.key
 HYTLSEOF
 
-    # Разрешаем Hy2 читать сертификаты Caddy
-    chmod -R 755 /var/lib/caddy 2>/dev/null || true
-
-    # Hook: при обновлении сертификата Caddy — рестарт Hy2
-    cat > /etc/systemd/system/caddy-cert-watcher.path << 'WATCHEOF'
+      # Hook: при обновлении сертификата Caddy → рестарт Hy2
+      cat > /etc/systemd/system/caddy-cert-watcher.path << 'WATCHEOF'
 [Unit]
-Description=Watch Caddy cert for changes -> restart hysteria
+Description=Watch Caddy cert for changes -> restart hysteria-server
 
 [Path]
 PathModified=/var/lib/caddy/.local/share/caddy/certificates
@@ -478,14 +501,17 @@ PathModified=/var/lib/caddy/.local/share/caddy/certificates
 WantedBy=multi-user.target
 WATCHEOF
 
-    cat > /etc/systemd/system/caddy-cert-watcher.service << 'WATCHSVCEOF'
+      cat > /etc/systemd/system/caddy-cert-watcher.service << 'WATCHSVCEOF'
 [Unit]
-Description=Restart hysteria on Caddy cert change
+Description=Restart hysteria-server on Caddy cert change
 
 [Service]
 Type=oneshot
 ExecStart=/bin/systemctl restart hysteria-server.service
 WATCHSVCEOF
+
+      log_ok "caddy-cert-watcher настроен"
+    fi
 
   else
     cat >> /etc/hysteria/config.yaml << HYACMEEOF
@@ -516,11 +542,21 @@ quic:
 HYBWEOF
 
   # Systemd сервис Hysteria
-  cat > /etc/systemd/system/hysteria-server.service << 'HYSVCEOF'
+  # Если Caddy установлен — Hy2 стартует после него (нужен его cert)
+  if [[ $INSTALL_NAIVE -eq 1 ]]; then
+    HY_UNIT_AFTER="After=network.target network-online.target caddy.service"
+    HY_UNIT_WANTS="Wants=caddy.service"
+  else
+    HY_UNIT_AFTER="After=network.target network-online.target"
+    HY_UNIT_WANTS=""
+  fi
+
+  cat > /etc/systemd/system/hysteria-server.service << HYSVCEOF
 [Unit]
 Description=Hysteria2 Server (by RIXXX)
 Documentation=https://v2.hysteria.network/
-After=network.target network-online.target
+${HY_UNIT_AFTER}
+${HY_UNIT_WANTS}
 Requires=network-online.target
 
 [Service]
@@ -532,8 +568,10 @@ WorkingDirectory=/etc/hysteria
 LimitNOFILE=1048576
 LimitNPROC=512
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-Restart=always
-RestartSec=5s
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
 StandardOutput=journal
 StandardError=journal
 
@@ -544,20 +582,28 @@ HYSVCEOF
   systemctl daemon-reload
   systemctl enable hysteria-server >/dev/null 2>&1 || true
   systemctl enable caddy-cert-watcher.path >/dev/null 2>&1 || true
-  systemctl start caddy-cert-watcher.path >/dev/null 2>&1 || true
+  systemctl start  caddy-cert-watcher.path >/dev/null 2>&1 || true
 
   systemctl start hysteria-server 2>&1 || log_warn "hysteria-server start: возможны проблемы, см. journalctl -u hysteria-server"
 
   HY_OK=0
-  for i in $(seq 1 15); do
-    if systemctl is-active --quiet hysteria-server 2>/dev/null; then
+  for i in $(seq 1 20); do
+    HY_STATUS=$(systemctl is-active hysteria-server 2>/dev/null || echo "unknown")
+    if [[ "$HY_STATUS" == "active" ]]; then
       log_ok "Hysteria2 запущена (${i}с)"
       HY_OK=1
+      break
+    elif [[ "$HY_STATUS" == "failed" ]]; then
+      log_warn "hysteria-server: failed — диагностика:"
+      journalctl -u hysteria-server -n 20 --no-pager 2>/dev/null || true
+      log_warn "Попытка рестарта..."
+      systemctl reset-failed hysteria-server 2>/dev/null || true
+      systemctl start hysteria-server 2>/dev/null || true
       break
     fi
     sleep 1
   done
-  [[ $HY_OK -eq 0 ]] && log_warn "Hy2 запускается медленно — проверьте: journalctl -u hysteria-server -n 40"
+  [[ $HY_OK -eq 0 ]] && log_warn "Hy2 не стартовала за 20с — команда для диагностики: journalctl -u hysteria-server -n 50 --no-pager"
 fi
 
 # ── Б9. Node.js ─────────────────────────────────────────────────────────
@@ -612,36 +658,38 @@ log_ok "Панель загружена в ${PANEL_DIR}"
 if [[ ! -f "${PANEL_DIR}/panel/data/config.json" ]]; then
   NAIVE_USERS_JSON="[]"
   HY2_USERS_JSON="[]"
+  CREATED_AT="$(date -u +%FT%TZ)"
 
   if [[ $INSTALL_NAIVE -eq 1 ]]; then
-    NAIVE_USERS_JSON=$(cat <<EOF
-[{"username":"${NAIVE_LOGIN}","password":"${NAIVE_PASS}","createdAt":"$(date -u +%FT%TZ)"}]
-EOF
-)
+    NAIVE_USERS_JSON="[{\"username\":\"${NAIVE_LOGIN}\",\"password\":\"${NAIVE_PASS}\",\"createdAt\":\"${CREATED_AT}\"}]"
   fi
   if [[ $INSTALL_HY2 -eq 1 ]]; then
-    HY2_USERS_JSON=$(cat <<EOF
-[{"username":"default","password":"${HY2_PASS}","createdAt":"$(date -u +%FT%TZ)"}]
-EOF
-)
+    HY2_USERS_JSON="[{\"username\":\"default\",\"password\":\"${HY2_PASS}\",\"createdAt\":\"${CREATED_AT}\"}]"
   fi
+
+  # Вычисляем boolean-флаги заранее (heredoc не поддерживает $() внутри)
+  [[ $INSTALL_NAIVE -eq 1 ]] && STACK_NAIVE="true" || STACK_NAIVE="false"
+  [[ $INSTALL_HY2   -eq 1 ]] && STACK_HY2="true"   || STACK_HY2="false"
 
   cat > "${PANEL_DIR}/panel/data/config.json" << CONFIGEOF
 {
   "installed": true,
   "stack": {
-    "naive": $( [[ $INSTALL_NAIVE -eq 1 ]] && echo true || echo false ),
-    "hy2":   $( [[ $INSTALL_HY2 -eq 1 ]] && echo true || echo false )
+    "naive": ${STACK_NAIVE},
+    "hy2":   ${STACK_HY2}
   },
   "domain": "${PROXY_DOMAIN}",
   "email": "${PROXY_EMAIL}",
   "serverIp": "${SERVER_IP}",
   "arch": "${MACHINE_ARCH}",
+  "adminPassword": "",
   "naiveUsers": ${NAIVE_USERS_JSON},
   "hy2Users":   ${HY2_USERS_JSON}
 }
 CONFIGEOF
   log_ok "config.json записан"
+else
+  log_warn "config.json уже существует — не перезаписываем"
 fi
 
 # ── Б13. UFW ────────────────────────────────────────────────────────────
