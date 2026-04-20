@@ -332,6 +332,13 @@ HTMLEOF
   {
     printf '{\n'
     printf '  order forward_proxy before file_server\n'
+    printf '  email %s\n' "${PROXY_EMAIL}"
+    # Явно фиксируем Let's Encrypt как единственный CA в глобальном блоке.
+    # Без этого Caddy может выбрать ZeroSSL — путь к серту станет
+    # certificates/acme.zerossl.com-v2-dv90/... вместо
+    # certificates/acme-v02.api.letsencrypt.org-directory/...
+    # — и Hysteria2 не найдёт cert, уйдёт в свой ACME и получит LE rate limit 429.
+    printf '  acme_ca https://acme-v02.api.letsencrypt.org/directory\n'
     if [[ $INSTALL_HY2 -eq 1 ]]; then
       printf '  servers {\n'
       printf '    protocols h1 h2\n'
@@ -512,37 +519,51 @@ masquerade:
 HYCFGEOF
 
   if [[ "$HY_TLS_MODE" == "caddy" ]]; then
-    # Caddy может хранить cert в двух местах — проверяем оба
-    CADDY_CERT_BASE_NEW="/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${PROXY_DOMAIN}"
-    CADDY_CERT_BASE_OLD="/root/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${PROXY_DOMAIN}"
+    # КРИТИЧНО: Caddy может получить сертификат от ЛЮБОГО CA
+    # (Let's Encrypt / ZeroSSL / Google Trust). Путь в certificates/ содержит
+    # имя CA. Ищем через find по ЛЮБОМУ пути, не только LE.
+    CADDY_CERT_ROOTS=(
+      "/var/lib/caddy/.local/share/caddy/certificates"
+      "/root/.local/share/caddy/certificates"
+    )
     CADDY_CERT_DIR=""
 
-    log_info "Ждём сертификат от Caddy (до 90с)..."
-    for i in $(seq 1 45); do
-      if [[ -f "${CADDY_CERT_BASE_NEW}/${PROXY_DOMAIN}.crt" ]]; then
-        CADDY_CERT_DIR="${CADDY_CERT_BASE_NEW}"
-        log_ok "Сертификат найден (${i}х2с) — /var/lib/caddy"
-        break
-      elif [[ -f "${CADDY_CERT_BASE_OLD}/${PROXY_DOMAIN}.crt" ]]; then
-        CADDY_CERT_DIR="${CADDY_CERT_BASE_OLD}"
-        log_ok "Сертификат найден (${i}х2с) — /root/.local"
-        break
-      fi
+    log_info "Ждём сертификат от Caddy (до 150с, любой CA: LE/ZeroSSL/Google)..."
+    for i in $(seq 1 75); do
+      for ROOT in "${CADDY_CERT_ROOTS[@]}"; do
+        [[ -d "$ROOT" ]] || continue
+        # Ищем крт-файл для нашего домена в любой папке CA внутри certificates/
+        FOUND=$(find "$ROOT" -type f -name "${PROXY_DOMAIN}.crt" 2>/dev/null | head -1)
+        if [[ -n "$FOUND" && -f "${FOUND%.crt}.key" ]]; then
+          CADDY_CERT_DIR="$(dirname "$FOUND")"
+          CA_NAME="$(basename "$(dirname "$CADDY_CERT_DIR")")"
+          log_ok "Сертификат найден (${i}х2с) — CA: ${CA_NAME}"
+          log_info "  path: ${CADDY_CERT_DIR}"
+          break 2
+        fi
+      done
       sleep 2
     done
 
     if [[ -z "$CADDY_CERT_DIR" ]]; then
-      log_warn "Сертификат Caddy не найден за 90с — переключаемся на ACME для Hy2"
-      log_info "Это нормально при первом запуске если DNS ещё не прогрессировал."
-      log_info "Убедитесь что A-запись домена указывает на ${SERVER_IP}"
-      cat >> /etc/hysteria/config.yaml << HYACMEFBEOF
-acme:
-  domains:
-    - ${PROXY_DOMAIN}
-  email: ${PROXY_EMAIL}
-  ca: letsencrypt
-  listenHost: 0.0.0.0
-HYACMEFBEOF
+      log_warn "Сертификат Caddy не найден за 150с."
+      log_info "Диагностика (выполнит установщик):"
+      systemctl status caddy --no-pager -l 2>&1 | tail -15 | sed 's/^/  /'
+      journalctl -u caddy -n 20 --no-pager 2>&1 | tail -20 | sed 's/^/  /'
+      log_info "Проверьте: ${PROXY_DOMAIN} должен указывать A-записью на ${SERVER_IP}"
+      log_warn "⚠ Hy2 НЕ будет использовать собственный ACME (риск rate limit)."
+      log_warn "  Вместо этого Hy2 остановлен. Запустите после починки Caddy:"
+      log_warn "  systemctl restart caddy ; sleep 30 ; systemctl restart hysteria-server"
+      # Вместо fallback ACME (который жжёт LE rate limit!) — отключаем Hy2 TLS секцию,
+      # оставляя конфиг без tls/acme — Hy2 не стартует, это лучше чем получить 429 на неделю.
+      cat >> /etc/hysteria/config.yaml << HYNOTLSEOF
+# ⚠ Сертификат Caddy не был готов на момент установки.
+# После того как Caddy получит серт, замените этот комментарий на:
+#   tls:
+#     cert: /var/lib/caddy/.local/share/caddy/certificates/<CA>/${PROXY_DOMAIN}/${PROXY_DOMAIN}.crt
+#     key:  /var/lib/caddy/.local/share/caddy/certificates/<CA>/${PROXY_DOMAIN}/${PROXY_DOMAIN}.key
+# и выполните: systemctl restart hysteria-server
+HYNOTLSEOF
     else
       # Даём Hy2 доступ к файлам сертификата
       chmod -R 755 "$(dirname "$CADDY_CERT_DIR")" 2>/dev/null || true

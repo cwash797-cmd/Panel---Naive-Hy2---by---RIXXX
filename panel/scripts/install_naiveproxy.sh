@@ -209,6 +209,10 @@ HTMLEOF
 {
   printf '{\n'
   printf '  order forward_proxy before file_server\n'
+  printf '  email %s\n' "$EMAIL"
+  # Жёстко фиксируем Let's Encrypt (иначе Caddy может выбрать ZeroSSL,
+  # и Hy2 не найдёт сертификат в ожидаемом пути).
+  printf '  acme_ca https://acme-v02.api.letsencrypt.org/directory\n'
   if [[ "$WITH_HY2" == "1" ]]; then
     printf '  servers {\n'
     printf '    protocols h1 h2\n'
