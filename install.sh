@@ -178,7 +178,7 @@ echo ""
 # РАЗДЕЛ Б — УСТАНОВКА
 # ════════════════════════════════════════════════════════════════════════
 
-TOTAL_STEPS=14
+TOTAL_STEPS=15
 [[ $INSTALL_HY2 -eq 1 ]] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 STEP_NUM=0
 next_step() { STEP_NUM=$((STEP_NUM + 1)); log_step "[${STEP_NUM}/${TOTAL_STEPS}] $1"; }
@@ -363,6 +363,11 @@ HTMLEOF
   pkill -x caddy 2>/dev/null || true
   sleep 1
 
+  # КРИТИЧНО: гарантируем что Caddy хранит данные в /var/lib/caddy,
+  # а не в /root/.local/share/caddy — иначе Hysteria2 не найдёт сертификат.
+  mkdir -p /var/lib/caddy/.local/share/caddy /var/lib/caddy/.config/caddy
+  chmod -R 755 /var/lib/caddy 2>/dev/null || true
+
   cat > /etc/systemd/system/caddy.service << 'SVCEOF'
 [Unit]
 Description=Caddy with NaiveProxy (by RIXXX)
@@ -374,13 +379,18 @@ Requires=network-online.target
 Type=notify
 User=root
 Group=root
+# Принудительно фиксируем директории данных Caddy.
+# Без этого Caddy (под root) кладёт сертификаты в /root/.local/share/caddy,
+# а Hysteria2 ожидает их в /var/lib/caddy.
+Environment=HOME=/var/lib/caddy
+Environment=XDG_DATA_HOME=/var/lib/caddy/.local/share
+Environment=XDG_CONFIG_HOME=/var/lib/caddy/.config
 ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
 ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
 TimeoutStopSec=5s
 LimitNOFILE=1048576
 LimitNPROC=512
-PrivateTmp=true
-ProtectSystem=full
+# PrivateTmp + ProtectSystem убраны — они мешают Caddy писать в /var/lib/caddy
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=always
 RestartSec=5s
@@ -393,6 +403,16 @@ SVCEOF
 
   systemctl daemon-reload
   systemctl enable caddy >/dev/null 2>&1 || true
+
+  # Миграция: если на сервере есть старые сертификаты от Caddy под /root —
+  # переносим в /var/lib/caddy, чтобы не пришлось заново получать ACME.
+  if [[ -d /root/.local/share/caddy/certificates && \
+        ! -d /var/lib/caddy/.local/share/caddy/certificates ]]; then
+    log_info "Миграция сертификатов Caddy: /root/.local -> /var/lib/caddy"
+    mkdir -p /var/lib/caddy/.local/share/caddy
+    cp -a /root/.local/share/caddy/. /var/lib/caddy/.local/share/caddy/ 2>/dev/null || true
+    chmod -R 755 /var/lib/caddy 2>/dev/null || true
+  fi
 
   # ── Б7. Запуск Caddy ────────────────────────────────────────────────
   next_step "Запуск Caddy (получение TLS сертификата)..."
@@ -536,12 +556,13 @@ tls:
 HYTLSEOF
 
       # Hook: при обновлении сертификата Caddy → рестарт Hy2
-      cat > /etc/systemd/system/caddy-cert-watcher.path << 'WATCHEOF'
+      # Watcher на обе возможные директории (новая /var/lib и legacy /root/.local)
+      cat > /etc/systemd/system/caddy-cert-watcher.path << WATCHEOF
 [Unit]
 Description=Watch Caddy cert for changes -> restart hysteria-server
 
 [Path]
-PathModified=/var/lib/caddy/.local/share/caddy/certificates
+PathModified=${CADDY_CERT_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -556,7 +577,10 @@ Type=oneshot
 ExecStart=/bin/systemctl restart hysteria-server.service
 WATCHSVCEOF
 
-      log_ok "caddy-cert-watcher настроен"
+      systemctl daemon-reload
+      systemctl enable caddy-cert-watcher.path >/dev/null 2>&1 || true
+      systemctl start  caddy-cert-watcher.path >/dev/null 2>&1 || true
+      log_ok "caddy-cert-watcher настроен (${CADDY_CERT_DIR})"
     fi
 
   else
@@ -673,12 +697,51 @@ PM2_VER=$(pm2 -v 2>/dev/null || echo "ok")
 log_ok "PM2: ${PM2_VER}"
 
 # ── Б11. Nginx (если нужно) ─────────────────────────────────────────────
+NGINX_OK=0
 if [[ "$ACCESS_MODE" == "1" || "$ACCESS_MODE" == "3" ]]; then
   next_step "Установка Nginx..."
-  apt-get install -y -qq nginx \
-    -o Dpkg::Options::="--force-confdef" \
-    -o Dpkg::Options::="--force-confold" 2>/dev/null || true
-  log_ok "Nginx установлен"
+
+  # apt-get update на всякий случай (старый кеш на свежей VPS)
+  apt-get update -qq 2>&1 | tail -2 || true
+
+  # Если уже установлен — не переустанавливаем
+  if command -v nginx >/dev/null 2>&1; then
+    log_ok "Nginx уже установлен: $(nginx -v 2>&1 | head -1)"
+    NGINX_OK=1
+  else
+    # Чистая установка — НЕ подавляем ошибки, нужен реальный код возврата
+    apt-get install -y nginx \
+      -o Dpkg::Options::="--force-confdef" \
+      -o Dpkg::Options::="--force-confold" 2>&1 | tail -15
+    APT_RC=${PIPESTATUS[0]}
+
+    if [[ $APT_RC -eq 0 ]] && command -v nginx >/dev/null 2>&1; then
+      log_ok "Nginx установлен: $(nginx -v 2>&1 | head -1)"
+      NGINX_OK=1
+    else
+      log_err "Nginx не установился (exit=$APT_RC). Попробую второй раз через snap/apt с unlock..."
+      # Попытка 2: часто на свежей Ubuntu 24 apt-lock от unattended-upgrades
+      systemctl stop unattended-upgrades 2>/dev/null || true
+      fuser -k /var/lib/dpkg/lock-frontend 2>/dev/null || true
+      fuser -k /var/lib/dpkg/lock 2>/dev/null || true
+      dpkg --configure -a 2>&1 | tail -5 || true
+      sleep 2
+      if apt-get install -y nginx 2>&1 | tail -10 && command -v nginx >/dev/null 2>&1; then
+        log_ok "Nginx установлен со второй попытки"
+        NGINX_OK=1
+      else
+        log_err "Nginx всё равно не установился. Панель будет доступна только на порту ${INTERNAL_PORT}."
+        log_info "  Диагностика: apt-cache policy nginx ; dpkg -l | grep nginx"
+        NGINX_OK=0
+      fi
+    fi
+  fi
+
+  # Если Nginx всё-таки провалился — автоматически переключаемся на прямой доступ
+  if [[ $NGINX_OK -eq 0 ]]; then
+    log_warn "ACCESS_MODE переключён с Nginx на прямой доступ к порту ${INTERNAL_PORT}"
+    ACCESS_MODE="2"
+  fi
 fi
 
 # ── Б12. Клонирование панели ────────────────────────────────────────────
@@ -739,25 +802,18 @@ else
   log_warn "config.json уже существует — не перезаписываем"
 fi
 
-# ── Б13. UFW ────────────────────────────────────────────────────────────
-next_step "Настройка файрволла UFW..."
+# ── Б13. UFW (базовые порты) ────────────────────────────────────────────
+# ВАЖНО: Порты панели (3000/8080) настраиваем ПОСЛЕ запуска Nginx,
+# чтобы при провале nginx автоматически открыть 3000.
+next_step "Настройка файрволла UFW (базовые порты)..."
 
 ufw allow 22/tcp  >/dev/null 2>&1 || true
 ufw allow 80/tcp  >/dev/null 2>&1 || true
 ufw allow 443/tcp >/dev/null 2>&1 || true
 ufw allow 443/udp >/dev/null 2>&1 || true
 
-if [[ "$ACCESS_MODE" == "1" ]]; then
-  ufw allow 8080/tcp >/dev/null 2>&1 || true
-  ufw deny  ${INTERNAL_PORT}/tcp >/dev/null 2>&1 || true
-elif [[ "$ACCESS_MODE" == "2" ]]; then
-  ufw allow ${INTERNAL_PORT}/tcp >/dev/null 2>&1 || true
-elif [[ "$ACCESS_MODE" == "3" ]]; then
-  ufw deny  ${INTERNAL_PORT}/tcp >/dev/null 2>&1 || true
-fi
-
 echo "y" | ufw enable >/dev/null 2>&1 || ufw --force enable >/dev/null 2>&1 || true
-log_ok "UFW настроен (22, 80, 443/tcp, 443/udp)"
+log_ok "UFW: 22, 80, 443/tcp, 443/udp открыты"
 
 # ── Б14. Запуск панели ──────────────────────────────────────────────────
 next_step "Запуск панели через PM2..."
@@ -828,7 +884,22 @@ fi
 
 # ── Настройка Nginx ─────────────────────────────────────────────────────
 if [[ "$ACCESS_MODE" == "1" ]]; then
+  # Двойная защита: если nginx не установлен — не пытаемся его настраивать
+  if ! command -v nginx >/dev/null 2>&1; then
+    log_err "Nginx не найден (command -v nginx). Пропускаю настройку."
+    log_warn "Панель доступна только на порту ${INTERNAL_PORT}."
+    ACCESS_MODE="2"
+  elif [[ ! -d /etc/nginx/sites-available ]]; then
+    log_err "/etc/nginx/sites-available не существует (повреждённая установка?)."
+    log_warn "Панель доступна только на порту ${INTERNAL_PORT}."
+    ACCESS_MODE="2"
+  fi
+fi
+
+if [[ "$ACCESS_MODE" == "1" ]]; then
   log_info "Настройка Nginx (8080 → 3000)..."
+  # На всякий случай гарантируем директории (на Ubuntu 24 иногда отсутствуют после minimal)
+  mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
   cat > /etc/nginx/sites-available/panel-naive-hy2 << NGINXEOF
 server {
     listen 8080;
@@ -873,10 +944,15 @@ NGINXEOF
   fi
 
 elif [[ "$ACCESS_MODE" == "3" && -n "$PANEL_DOMAIN" ]]; then
-  log_info "Настройка Nginx + SSL для ${PANEL_DOMAIN}..."
-  apt-get install -y -qq python3-certbot-nginx 2>/dev/null || true
+  if ! command -v nginx >/dev/null 2>&1; then
+    log_err "Nginx не установлен — SSL-настройка невозможна. Панель доступна на порту ${INTERNAL_PORT}."
+    ACCESS_MODE="2"
+  else
+    log_info "Настройка Nginx + SSL для ${PANEL_DOMAIN}..."
+    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+    apt-get install -y -qq python3-certbot-nginx 2>&1 | tail -3 || log_warn "certbot-nginx не установлен, попробуем без него"
 
-  cat > /etc/nginx/sites-available/panel-naive-hy2 << NGINXEOF
+    cat > /etc/nginx/sites-available/panel-naive-hy2 << NGINXEOF
 server {
     listen 80;
     server_name ${PANEL_DOMAIN};
@@ -891,17 +967,75 @@ server {
     }
 }
 NGINXEOF
-  ln -sf /etc/nginx/sites-available/panel-naive-hy2 \
-    /etc/nginx/sites-enabled/panel-naive-hy2 2>/dev/null || true
-  rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
-  nginx -t >/dev/null 2>&1 && systemctl restart nginx && systemctl enable nginx >/dev/null 2>&1 || true
+    ln -sf /etc/nginx/sites-available/panel-naive-hy2 \
+      /etc/nginx/sites-enabled/panel-naive-hy2 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    nginx -t >/dev/null 2>&1 && systemctl restart nginx && systemctl enable nginx >/dev/null 2>&1 || true
 
-  certbot --nginx -d "${PANEL_DOMAIN}" \
-    --email "${PANEL_EMAIL_SSL:-admin@${PANEL_DOMAIN}}" \
-    --agree-tos --non-interactive 2>&1 | tail -4 \
-    || log_warn "SSL для панели: проверьте DNS запись"
+    certbot --nginx -d "${PANEL_DOMAIN}" \
+      --email "${PANEL_EMAIL_SSL:-admin@${PANEL_DOMAIN}}" \
+      --agree-tos --non-interactive 2>&1 | tail -4 \
+      || log_warn "SSL для панели: проверьте DNS запись"
 
-  log_ok "Nginx + SSL настроен для ${PANEL_DOMAIN}"
+    log_ok "Nginx + SSL настроен для ${PANEL_DOMAIN}"
+  fi
+fi
+
+# ── Б15. UFW для порта панели (финал — после Nginx) ─────────────────────
+# Только сейчас мы знаем финальный ACCESS_MODE (мог смениться при провале Nginx)
+log_info "UFW: открываю порт панели согласно режиму доступа..."
+if [[ "$ACCESS_MODE" == "1" ]]; then
+  # Nginx успешно настроен на 8080 → открываем 8080, закрываем 3000
+  ufw allow 8080/tcp >/dev/null 2>&1 || true
+  ufw deny  ${INTERNAL_PORT}/tcp >/dev/null 2>&1 || true
+  log_ok "UFW: 8080/tcp открыт, ${INTERNAL_PORT}/tcp закрыт"
+elif [[ "$ACCESS_MODE" == "2" ]]; then
+  # Прямой доступ → открываем 3000
+  ufw allow ${INTERNAL_PORT}/tcp >/dev/null 2>&1 || true
+  log_ok "UFW: ${INTERNAL_PORT}/tcp открыт (прямой доступ)"
+elif [[ "$ACCESS_MODE" == "3" ]]; then
+  # Nginx+SSL на домене → открыто только 80/443, 3000 закрыт
+  ufw deny  ${INTERNAL_PORT}/tcp >/dev/null 2>&1 || true
+  log_ok "UFW: ${INTERNAL_PORT}/tcp закрыт, доступ через домен (443/tcp)"
+fi
+
+# ════════════════════════════════════════════════════════════════════════
+# ФИНАЛЬНАЯ САМОПРОВЕРКА
+# ════════════════════════════════════════════════════════════════════════
+next_step "Финальная самопроверка панели..."
+
+# Сначала panel на 3000 (он точно должен слушать внутри)
+sleep 2
+PANEL_LOCAL_OK=0
+if curl -fsS --max-time 5 "http://127.0.0.1:${INTERNAL_PORT}/" >/dev/null 2>&1; then
+  log_ok "Панель отвечает на http://127.0.0.1:${INTERNAL_PORT}"
+  PANEL_LOCAL_OK=1
+else
+  log_err "Панель НЕ отвечает на 127.0.0.1:${INTERNAL_PORT}!"
+  log_info "  pm2 status ; pm2 logs ${SERVICE_NAME} --lines 40"
+fi
+
+# Проверка финальной точки входа в зависимости от ACCESS_MODE
+if [[ "$ACCESS_MODE" == "1" ]]; then
+  if ss -tlnp 2>/dev/null | grep -q ':8080 '; then
+    log_ok "Порт 8080 (Nginx) слушается"
+    if curl -fsS --max-time 5 "http://127.0.0.1:8080/" >/dev/null 2>&1; then
+      log_ok "Nginx отвечает на :8080 и проксирует на панель ✓"
+    else
+      log_warn "Nginx слушает :8080 но проксирование не работает. Проверьте: nginx -t; systemctl status nginx"
+    fi
+  else
+    log_err "Порт 8080 НЕ слушается!"
+    log_warn "Nginx мог провалиться при запуске. Пробую как fallback открыть прямой доступ к :${INTERNAL_PORT}..."
+    ufw allow ${INTERNAL_PORT}/tcp >/dev/null 2>&1 || true
+    ACCESS_MODE="2"
+  fi
+elif [[ "$ACCESS_MODE" == "2" ]]; then
+  if ss -tlnp 2>/dev/null | grep -q ":${INTERNAL_PORT} "; then
+    log_ok "Порт ${INTERNAL_PORT} слушается, панель доступна напрямую"
+  else
+    log_err "Порт ${INTERNAL_PORT} НЕ слушается!"
+  fi
 fi
 
 # ════════════════════════════════════════════════════════════════════════
