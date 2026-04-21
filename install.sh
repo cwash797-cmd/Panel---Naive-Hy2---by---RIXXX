@@ -368,20 +368,17 @@ HTMLEOF
     printf '  }\n'
     printf '}\n'
 
-    # ── Вторый site-блок: панель на отдельном поддомене (ACCESS_MODE=3) ──
-    # Caddy разрулит по SNI: prolog-домен → NaiveProxy, PANEL_DOMAIN → панель.
+    # ── Второй site-блок: панель на отдельном поддомене (ACCESS_MODE=3) ──
+    # Caddy разрулит по SNI: домен прокси → NaiveProxy, PANEL_DOMAIN → панель.
     # Порт 443/tcp один, оба сайта живут параллельно. UDP/443 свободен для Hy2.
+    # reverse_proxy в Caddy сам добавит нужные заголовки (Host, X-Forwarded-*),
+    # поэтому дополнительные header_up не нужны (иначе Caddy пишет warn в логах).
     if [[ "$ACCESS_MODE" == "3" && -n "$PANEL_DOMAIN" ]]; then
       printf '\n'
       printf '%s {\n' "${PANEL_DOMAIN}"
       printf '  tls %s\n' "${PANEL_EMAIL_SSL:-${PROXY_EMAIL}}"
       printf '  encode gzip\n'
-      printf '  reverse_proxy 127.0.0.1:%s {\n' "${INTERNAL_PORT}"
-      printf '    header_up Host {host}\n'
-      printf '    header_up X-Real-IP {remote_host}\n'
-      printf '    header_up X-Forwarded-For {remote_host}\n'
-      printf '    header_up X-Forwarded-Proto {scheme}\n'
-      printf '  }\n'
+      printf '  reverse_proxy 127.0.0.1:%s\n' "${INTERNAL_PORT}"
       printf '}\n'
     fi
   } > /etc/caddy/Caddyfile
@@ -821,6 +818,9 @@ if [[ ! -f "${PANEL_DIR}/panel/data/config.json" ]]; then
   },
   "domain": "${PROXY_DOMAIN}",
   "email": "${PROXY_EMAIL}",
+  "panelDomain": "${PANEL_DOMAIN}",
+  "panelEmail":  "${PANEL_EMAIL_SSL}",
+  "accessMode":  "${ACCESS_MODE}",
   "serverIp": "${SERVER_IP}",
   "arch": "${MACHINE_ARCH}",
   "adminPassword": "",

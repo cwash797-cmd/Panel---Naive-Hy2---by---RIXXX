@@ -71,6 +71,25 @@ function loadConfig() {
     }
     if (!Array.isArray(raw.naiveUsers)) raw.naiveUsers = [];
     if (!Array.isArray(raw.hy2Users)) raw.hy2Users = [];
+
+    // Миграция: если panelDomain не записан в config, но в Caddyfile есть
+    // второй site-блок для поддомена с reverse_proxy на 127.0.0.1 — вытащим его.
+    // Это спасает установки, сделанные до того, как install.sh начал писать
+    // panelDomain в config.json (коммит 0c0c204 и ранее).
+    if (!raw.panelDomain) {
+      try {
+        const caddyfile = fs.readFileSync('/etc/caddy/Caddyfile', 'utf8');
+        // Ищем блок вида: "somesubdomain.example.com {\n  tls ...\n  ...\n  reverse_proxy 127.0.0.1:..."
+        const m = caddyfile.match(/\n(\S+)\s*\{\s*\n\s*tls\s+(\S+)\s*\n[^}]*reverse_proxy\s+127\.0\.0\.1/);
+        if (m && m[1] && m[1] !== raw.domain && m[1].includes('.')) {
+          raw.panelDomain = m[1];
+          raw.panelEmail = m[2] || raw.email;
+          fs.writeFileSync(CONFIG_FILE, JSON.stringify(raw, null, 2));
+          console.log('[migrate] panelDomain восстановлен из Caddyfile:', raw.panelDomain);
+        }
+      } catch (_) { /* Caddyfile может отсутствовать — ничего страшного */ }
+    }
+
     return raw;
   } catch (e) {
     console.error('config.json parse error, resetting:', e.message);
@@ -300,7 +319,8 @@ function writeCaddyfile(cfg) {
   order forward_proxy before file_server
 }`;
 
-  const content = `${globalBlock}
+  // Основной site-блок: домен прокси
+  let content = `${globalBlock}
 
 :443, ${cfg.domain} {
   tls ${cfg.email}
@@ -317,6 +337,23 @@ ${lines || '    # no users yet'}
   }
 }
 `;
+
+  // Второй site-блок: панель на отдельном поддомене (ACCESS_MODE=3).
+  // ОБЯЗАТЕЛЬНО сохраняем этот блок при любой перегенерации Caddyfile,
+  // иначе после добавления юзеров Naive панель перестанет отвечать по HTTPS.
+  // panelDomain/panelEmail записываются install.sh при установке в режиме 3.
+  const internalPort = process.env.PORT || 3000;
+  if (cfg.panelDomain && cfg.panelDomain !== cfg.domain) {
+    const panelEmail = cfg.panelEmail || cfg.email;
+    content += `
+${cfg.panelDomain} {
+  tls ${panelEmail}
+  encode gzip
+  reverse_proxy 127.0.0.1:${internalPort}
+}
+`;
+  }
+
   try {
     fs.writeFileSync('/etc/caddy/Caddyfile', content, 'utf8');
     return true;
