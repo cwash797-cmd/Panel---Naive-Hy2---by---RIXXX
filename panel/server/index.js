@@ -324,6 +324,16 @@ function writeCaddyfile(cfg) {
   order forward_proxy before file_server
 }`;
 
+  // Маскировка: local → file_server, mirror → reverse_proxy <url>.
+  // Если masqueradeMode не задан (старая установка) — оставляем file_server (дефолт).
+  const masqueradeBlock = (cfg.masqueradeMode === 'mirror' && cfg.masqueradeUrl)
+    ? `  reverse_proxy ${cfg.masqueradeUrl} {
+    header_up Host {upstream_hostport}
+  }`
+    : `  file_server {
+    root /var/www/html
+  }`;
+
   // Основной site-блок: домен прокси
   let content = `${globalBlock}
 
@@ -337,9 +347,7 @@ ${lines || '    # no users yet'}
     probe_resistance
   }
 
-  file_server {
-    root /var/www/html
-  }
+${masqueradeBlock}
 }
 `;
 
@@ -591,10 +599,25 @@ function writeHysteriaConfig(cfg) {
   }
 
   if (base && typeof base === 'object') {
-    // Только обновляем userpass — всё остальное (tls/acme/quic/masquerade) не трогаем
+    // Только обновляем userpass — TLS/ACME/QUIC секции должны сохраняться!
     if (!base.auth) base.auth = { type: 'userpass' };
     base.auth.type = 'userpass';
     base.auth.userpass = userpass;
+
+    // Masquerade: переписываем секцию ТОЛЬКО если в config.json явно задан режим.
+    // Если masqueradeMode не указан (старая установка) — masquerade не трогаем,
+    // чтобы не сломать существующую конфигурацию.
+    if (cfg.masqueradeMode === 'mirror' && cfg.masqueradeUrl) {
+      base.masquerade = {
+        type: 'proxy',
+        proxy: { url: cfg.masqueradeUrl, rewriteHost: true }
+      };
+    } else if (cfg.masqueradeMode === 'local') {
+      base.masquerade = {
+        type: 'file',
+        file: { dir: '/var/www/html' }
+      };
+    }
     // ACL bypass (русские сервисы идут direct, минуя VPN): подставляем, если настроен
     applyBypassAcl(base, cfg);
   } else {
@@ -624,10 +647,15 @@ function writeHysteriaConfig(cfg) {
       }
     } catch (e) { /* ignore */ }
 
+    // Masquerade: учитываем выбор пользователя (по умолчанию — local).
+    const masqueradeBlock = (cfg.masqueradeMode === 'mirror' && cfg.masqueradeUrl)
+      ? { type: 'proxy', proxy: { url: cfg.masqueradeUrl, rewriteHost: true } }
+      : { type: 'file', file: { dir: '/var/www/html' } };
+
     base = {
       listen: ':443',
       auth: { type: 'userpass', userpass },
-      masquerade: { type: 'file', file: { dir: '/var/www/html' } },
+      masquerade: masqueradeBlock,
       ignoreClientBandwidth: true,
       quic: {
         initStreamReceiveWindow: 8388608, maxStreamReceiveWindow: 8388608,
