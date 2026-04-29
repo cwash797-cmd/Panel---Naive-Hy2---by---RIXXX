@@ -355,8 +355,11 @@ ${masqueradeBlock}
   // ОБЯЗАТЕЛЬНО сохраняем этот блок при любой перегенерации Caddyfile,
   // иначе после добавления юзеров Naive панель перестанет отвечать по HTTPS.
   // panelDomain/panelEmail записываются install.sh при установке в режиме 3.
+  //
+  // ИСКЛЮЧЕНИЕ: SSH-only режим (cfg.sshOnly === 1) — panel-блок НЕ добавляем,
+  // т.к. панель доступна только через SSH-туннель на 127.0.0.1.
   const internalPort = process.env.PORT || 3000;
-  if (cfg.panelDomain && cfg.panelDomain !== cfg.domain) {
+  if (cfg.panelDomain && cfg.panelDomain !== cfg.domain && cfg.sshOnly !== 1) {
     const panelEmail = cfg.panelEmail || cfg.email;
     content += `
 ${cfg.panelDomain} {
@@ -367,11 +370,57 @@ ${cfg.panelDomain} {
 `;
   }
 
+  // ── Атомарная запись с валидацией и rollback (PR #4) ──
+  // Проблема: если writeFileSync прервётся посередине или сгенерируется
+  // невалидный Caddyfile, мы оставим систему в полуразобранном состоянии —
+  // panel-блок может пропасть, и панель станет недоступна.
+  //
+  // Решение:
+  //   1. Бэкап текущего Caddyfile в /etc/caddy/Caddyfile.last (atomic via rename).
+  //   2. Запись нового конфига во временный файл /etc/caddy/Caddyfile.new.
+  //   3. Валидация через `caddy validate` (если caddy установлен).
+  //   4. Если валидно — atomic rename .new → Caddyfile.
+  //   5. Если невалидно — удаляем .new, бэкап остался нетронутым, возврат false.
+  //   6. На любой ошибке записи восстанавливаем из .last (rollback).
+  const targetPath = '/etc/caddy/Caddyfile';
+  const tmpPath = '/etc/caddy/Caddyfile.new';
+  const backupPath = '/etc/caddy/Caddyfile.last';
   try {
-    fs.writeFileSync('/etc/caddy/Caddyfile', content, 'utf8');
+    // 1) Бэкап (best-effort: если файла ещё нет — это первичная установка).
+    if (fs.existsSync(targetPath)) {
+      try { fs.copyFileSync(targetPath, backupPath); } catch (e) { /* best-effort */ }
+    }
+    // 2) Запись во временный файл.
+    fs.writeFileSync(tmpPath, content, 'utf8');
+    // 3) Валидация через caddy validate (если caddy доступен).
+    try {
+      const { execSync } = require('child_process');
+      execSync(`caddy validate --config ${tmpPath}`, { stdio: 'pipe', timeout: 10000 });
+    } catch (validateErr) {
+      // caddy либо не установлен, либо validate упал.
+      // Если ошибка — НЕ stderr пустой → это реальная невалидность.
+      const stderr = (validateErr && validateErr.stderr) ? validateErr.stderr.toString() : '';
+      if (stderr && /error|adapt|parse/i.test(stderr)) {
+        console.error('[writeCaddyfile] caddy validate failed, keeping previous Caddyfile:', stderr.slice(0, 500));
+        try { fs.unlinkSync(tmpPath); } catch {}
+        return false;
+      }
+      // Иначе (caddy не установлен, ENOENT и т.п.) — пропускаем валидацию,
+      // продолжаем atomic rename (валидность подтвердится при reload).
+    }
+    // 4) Atomic rename — на ext4/xfs это атомарная операция.
+    fs.renameSync(tmpPath, targetPath);
     return true;
   } catch (e) {
     console.error('Caddyfile write error:', e.message);
+    // Rollback: если временный файл остался — удаляем; если бэкап есть — восстанавливаем.
+    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
+    try {
+      if (fs.existsSync(backupPath) && !fs.existsSync(targetPath)) {
+        fs.copyFileSync(backupPath, targetPath);
+        console.warn('[writeCaddyfile] Rolled back to previous Caddyfile from backup.');
+      }
+    } catch (rb) { /* best-effort */ }
     return false;
   }
 }
@@ -671,11 +720,43 @@ function writeHysteriaConfig(cfg) {
     applyBypassAcl(base, cfg);
   }
 
+  // ── Атомарная запись с валидацией и rollback (PR #4) ──
+  // Та же стратегия, что и в writeCaddyfile: temp → validate → atomic rename.
+  // Валидация: пробуем yaml.load() обратно; если падает — это означает
+  // что мы сами породили невалидный YAML (баг в коде), сохраняем старый.
+  const tmpPath = hyCfgPath + '.new';
+  const backupPath = hyCfgPath + '.last';
   try {
-    fs.writeFileSync(hyCfgPath, yaml.dump(base, { lineWidth: 120, quotingType: '"' }), 'utf8');
+    const newContent = yaml.dump(base, { lineWidth: 120, quotingType: '"' });
+    // 1) Бэкап (best-effort).
+    if (fs.existsSync(hyCfgPath)) {
+      try { fs.copyFileSync(hyCfgPath, backupPath); } catch (e) { /* best-effort */ }
+    }
+    // 2) Запись во временный файл.
+    fs.writeFileSync(tmpPath, newContent, 'utf8');
+    // 3) Self-validate: парсим обратно.
+    try {
+      const reparsed = yaml.load(newContent);
+      if (!reparsed || typeof reparsed !== 'object' || !reparsed.auth) {
+        throw new Error('parsed config is empty or missing auth section');
+      }
+    } catch (vErr) {
+      console.error('[writeHysteriaConfig] self-validate failed, keeping previous config:', vErr.message);
+      try { fs.unlinkSync(tmpPath); } catch {}
+      return false;
+    }
+    // 4) Atomic rename.
+    fs.renameSync(tmpPath, hyCfgPath);
     return true;
   } catch (e) {
     console.error('hysteria config write error:', e.message);
+    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
+    try {
+      if (fs.existsSync(backupPath) && !fs.existsSync(hyCfgPath)) {
+        fs.copyFileSync(backupPath, hyCfgPath);
+        console.warn('[writeHysteriaConfig] Rolled back to previous config from backup.');
+      }
+    } catch (rb) { /* best-effort */ }
     return false;
   }
 }
