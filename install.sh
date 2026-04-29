@@ -1246,6 +1246,106 @@ elif [[ "$ACCESS_MODE" == "3" && -n "$PANEL_DOMAIN" ]]; then
 fi
 
 # ════════════════════════════════════════════════════════════════════════
+# SMOKE-TEST — автопроверка работоспособности после установки (PR #4)
+# ════════════════════════════════════════════════════════════════════════
+# Проверяем, что все компоненты реально работают, а не просто "установились".
+# Если что-то не так — выводим конкретную ошибку и подсказку, но НЕ падаем
+# (exit 0): инсталляция уже завершилась, реквизиты ниже всё равно нужно
+# показать пользователю.
+
+echo ""
+echo -e "${CYAN}${BOLD}▶ Smoke-test: проверка работоспособности${RESET}"
+
+SMOKE_FAILS=0
+SMOKE_WARNS=0
+
+# 1) Caddyfile validate (если установлен NaiveProxy).
+if [[ $INSTALL_NAIVE -eq 1 ]]; then
+  if [[ -f /etc/caddy/Caddyfile ]]; then
+    if caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+      log_ok "Caddyfile валиден"
+    else
+      log_err "Caddyfile НЕ прошёл validate — проверьте: caddy validate --config /etc/caddy/Caddyfile"
+      SMOKE_FAILS=$((SMOKE_FAILS+1))
+    fi
+  else
+    log_warn "Caddyfile отсутствует (/etc/caddy/Caddyfile)"
+    SMOKE_WARNS=$((SMOKE_WARNS+1))
+  fi
+fi
+
+# 2) Статус сервисов через systemctl.
+check_service() {
+  local svc="$1"
+  if systemctl is-active --quiet "$svc" 2>/dev/null; then
+    log_ok "${svc}: active"
+    return 0
+  fi
+  return 1
+}
+
+if [[ $INSTALL_NAIVE -eq 1 ]]; then
+  check_service caddy || { log_err "caddy не запущен — journalctl -u caddy --no-pager -n 30"; SMOKE_FAILS=$((SMOKE_FAILS+1)); }
+fi
+if [[ $INSTALL_HY2 -eq 1 ]]; then
+  check_service hysteria-server || { log_err "hysteria-server не запущен — journalctl -u hysteria-server --no-pager -n 30"; SMOKE_FAILS=$((SMOKE_FAILS+1)); }
+fi
+
+# Панель: pm2 (приоритет) → systemd (fallback).
+if pm2 describe "${SERVICE_NAME}" 2>/dev/null | grep -q online; then
+  log_ok "${SERVICE_NAME}: online (pm2)"
+elif check_service "${SERVICE_NAME}"; then
+  : # уже залогировано
+else
+  log_err "Панель ${SERVICE_NAME} не запущена — pm2 logs ${SERVICE_NAME} --nostream"
+  SMOKE_FAILS=$((SMOKE_FAILS+1))
+fi
+
+# 3) Локальный HTTP-чек панели.
+if curl -fsSL --max-time 5 -o /dev/null "http://127.0.0.1:${INTERNAL_PORT}/" 2>/dev/null; then
+  log_ok "Панель отвечает на http://127.0.0.1:${INTERNAL_PORT}/"
+else
+  log_warn "Панель не ответила на http://127.0.0.1:${INTERNAL_PORT}/ (это нормально, если она ещё прогревается)"
+  SMOKE_WARNS=$((SMOKE_WARNS+1))
+fi
+
+# 4) Внешний HTTPS-чек (только если есть проксирующий домен).
+# Делаем тихо и с малым timeout, потому что LE сертификат может ещё не выписаться
+# в первые секунды после старта Caddy. Не считаем это fatal.
+if [[ $INSTALL_NAIVE -eq 1 && -n "${PROXY_DOMAIN:-}" ]]; then
+  # -k не используем — наоборот, проверяем что TLS настоящий.
+  # Если LE ещё не выписан (первые 30-60 секунд), curl упадёт — это норма.
+  if curl -fsSL --max-time 8 -o /dev/null "https://${PROXY_DOMAIN}/" 2>/dev/null; then
+    log_ok "https://${PROXY_DOMAIN}/ отвечает (TLS OK)"
+  else
+    log_warn "https://${PROXY_DOMAIN}/ пока не отвечает — обычно LE выписывает сертификат 1-2 минуты"
+    log_info "  Проверьте через минуту: curl -I https://${PROXY_DOMAIN}/"
+    SMOKE_WARNS=$((SMOKE_WARNS+1))
+  fi
+fi
+
+# 5) Внешний HTTPS-чек панельного поддомена (ACCESS_MODE=3, не SSH-only).
+if [[ "$ACCESS_MODE" == "3" && -n "${PANEL_DOMAIN:-}" && "$SSH_ONLY" != "1" ]]; then
+  if curl -fsSL --max-time 8 -o /dev/null "https://${PANEL_DOMAIN}/" 2>/dev/null; then
+    log_ok "https://${PANEL_DOMAIN}/ отвечает (TLS OK)"
+  else
+    log_warn "https://${PANEL_DOMAIN}/ пока не отвечает — LE может выписывать сертификат 1-2 минуты"
+    SMOKE_WARNS=$((SMOKE_WARNS+1))
+  fi
+fi
+
+# Итог smoke-теста.
+if [[ $SMOKE_FAILS -eq 0 && $SMOKE_WARNS -eq 0 ]]; then
+  log_ok "Smoke-test: все проверки пройдены"
+elif [[ $SMOKE_FAILS -eq 0 ]]; then
+  log_warn "Smoke-test: ${SMOKE_WARNS} предупреждений (некритично — обычно временные)"
+else
+  log_err "Smoke-test: ${SMOKE_FAILS} ошибок, ${SMOKE_WARNS} предупреждений"
+  log_info "Диагностика: bash update.sh --status"
+  log_info "Восстановление: bash update.sh --repair"
+fi
+
+# ════════════════════════════════════════════════════════════════════════
 # ФИНАЛЬНЫЙ ВЫВОД
 # ════════════════════════════════════════════════════════════════════════
 

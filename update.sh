@@ -16,6 +16,13 @@
 #    --masquerade         интерактивно сменить режим маскировки на существующей
 #                         установке (local | mirror <url>). Перегенерирует
 #                         Caddyfile и Hy2 config, перезапускает сервисы.
+#    --repair             регенерация Caddyfile и /etc/hysteria/config.yaml из
+#                         config.json. Перед изменениями автоматически делает
+#                         бэкап в /etc/rixxx-panel/backups/YYYY-MM-DD/.
+#                         При невалидном результате — откат из бэкапа.
+#    --status             вывести состояние установки: версия, статус сервисов
+#                         (caddy/hysteria/panel), TLS-сертификаты, открытые
+#                         порты, режим маскировки, режим доступа к панели.
 # ═══════════════════════════════════════════════════════════════════════
 
 set -uo pipefail
@@ -24,7 +31,7 @@ export DEBIAN_FRONTEND=noninteractive
 # ── Версия, до которой довести систему этим запуском ────────────────────
 # При добавлении новой миграции — увеличиваем TARGET_VERSION и регистрируем
 # функцию в migration_registry().
-TARGET_VERSION="1.2.0"
+TARGET_VERSION="1.3.0"
 
 # ── Пути ────────────────────────────────────────────────────────────────
 PANEL_DIR="/opt/panel-naive-hy2"
@@ -42,6 +49,8 @@ FORCE=0
 EXPOSE_DOMAIN=""
 EXPOSE_MODE=0
 MASQUERADE_MODE_FLAG=0
+REPAIR_MODE=0
+STATUS_MODE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
@@ -56,8 +65,10 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --masquerade) MASQUERADE_MODE_FLAG=1; shift ;;
+    --repair)     REPAIR_MODE=1; shift ;;
+    --status)     STATUS_MODE=1; shift ;;
     --help|-h)
-      sed -n '2,21p' "$0"
+      sed -n '2,28p' "$0"
       exit 0
       ;;
     *)
@@ -96,7 +107,9 @@ header() {
 header
 
 # ── 1. Root check ───────────────────────────────────────────────────────
-if [[ $EUID -ne 0 ]]; then
+# Исключение: --status работает без root (read-only диагностика).
+# Проверяем после header, и если не --status — требуем root.
+if [[ $STATUS_MODE -ne 1 && $EUID -ne 0 ]]; then
   log_err "Запускайте от root: sudo bash update.sh"
   exit 1
 fi
@@ -126,25 +139,36 @@ if [[ $INSTALL_HAS_HY2 -eq 1 && ! -f "$HY2_CONFIG" ]]; then
 fi
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
-  log_err "Не найдены ключевые файлы существующей установки:"
-  for f in "${MISSING[@]}"; do
-    log_info "  • $f"
-  done
-  echo ""
-  log_warn "Похоже, панель ещё не установлена на этом сервере."
-  log_info "Запустите основной установщик:"
-  log_info "  bash <(curl -fsSL https://raw.githubusercontent.com/cwash797-cmd/Panel---Naive-Hy2---by---RIXXX/main/install.sh)"
-  exit 1
+  if [[ $STATUS_MODE -eq 1 ]]; then
+    # --status: мягкий режим — продолжаем работу даже без полной установки
+    # (его задача — диагностировать в т.ч. сломанные/частичные установки).
+    log_warn "Найдена неполная установка (или её нет):"
+    for f in "${MISSING[@]}"; do
+      log_info "  • $f"
+    done
+    echo ""
+  else
+    log_err "Не найдены ключевые файлы существующей установки:"
+    for f in "${MISSING[@]}"; do
+      log_info "  • $f"
+    done
+    echo ""
+    log_warn "Похоже, панель ещё не установлена на этом сервере."
+    log_info "Запустите основной установщик:"
+    log_info "  bash <(curl -fsSL https://raw.githubusercontent.com/cwash797-cmd/Panel---Naive-Hy2---by---RIXXX/main/install.sh)"
+    exit 1
+  fi
 fi
 
-log_ok "Установка обнаружена в ${PANEL_DIR}"
+[[ ${#MISSING[@]} -eq 0 ]] && log_ok "Установка обнаружена в ${PANEL_DIR}"
 [[ $INSTALL_HAS_NAIVE -eq 1 ]] && log_info "  • NaiveProxy: установлен"
 [[ $INSTALL_HAS_HY2 -eq 1 ]]   && log_info "  • Hysteria2:  установлен"
 
 # ── 3. Чтение текущей версии ────────────────────────────────────────────
 log_step "Определение текущей версии патчей..."
 
-mkdir -p "$VERSION_DIR"
+# Для --status mkdir может упасть из-за прав (запуск без root) — это OK.
+mkdir -p "$VERSION_DIR" 2>/dev/null || true
 
 CURRENT_VERSION="0.0.0"
 if [[ -f "$VERSION_FILE" ]]; then
@@ -185,6 +209,8 @@ migration_registry() {
   register_migration "1.1.0" migrate_listen_localhost
   # PR #3: Masquerade choice (local | mirror).
   register_migration "1.2.0" migrate_masquerade_default
+  # PR #4: Repair/status/autobackup/atomic-write — каркас, без data-миграции.
+  register_migration "1.3.0" migrate_repair_infra
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -278,6 +304,34 @@ migrate_masquerade_default() {
   log_info "  ${BOLD}1)${RESET} Локальная страница «Loading» (текущий режим)"
   log_info "  ${BOLD}2)${RESET} Зеркалирование внешнего сайта (apple.com / github.com / amd.com)"
   log_info "Сменить можно командой: ${BOLD}bash update.sh --masquerade${RESET}"
+  echo ""
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Миграция 1.3.0: Repair / status / autobackup / atomic write
+# ─────────────────────────────────────────────────────────────────────────
+# Что делает:
+#   • Помечает установку как обновлённую до 1.3.0. Сама data-миграция не нужна:
+#     вся новая инфраструктура (атомарная запись Caddyfile, --repair, --status,
+#     автобэкап, smoke-test в install.sh) живёт в коде update.sh / install.sh
+#     и не требует изменений в config.json.
+#   • Создаёт каталог /etc/rixxx-panel/backups/ заранее, чтобы первый --repair
+#     не выводил предупреждение про отсутствие папки.
+#   • Информирует пользователя о новых возможностях.
+#
+# Контракт: не трогает users/certs/sysctl/configs.
+migrate_repair_infra() {
+  # Подготавливаем директорию для бэкапов.
+  mkdir -p "${VERSION_DIR}/backups" 2>/dev/null || true
+
+  echo ""
+  log_info "${BOLD}Новые возможности${RESET} (PR #4):"
+  log_info "  ${BOLD}•${RESET} ${CYAN}bash update.sh --status${RESET}  — диагностика установки одной командой"
+  log_info "  ${BOLD}•${RESET} ${CYAN}bash update.sh --repair${RESET}  — регенерация конфигов с автобэкапом и rollback"
+  log_info "  ${BOLD}•${RESET} Атомарная запись Caddyfile/Hy2 config в backend (защита panel-блока)"
+  log_info "  ${BOLD}•${RESET} Smoke-test в конце install.sh (caddy validate + curl-проверки)"
+  log_info "  Бэкапы хранятся в: ${VERSION_DIR}/backups/ (последние 10)"
   echo ""
   return 0
 }
@@ -534,6 +588,407 @@ EOF
   return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────
+# Утилита: auto_backup <tag>
+# ─────────────────────────────────────────────────────────────────────────
+# Делает снимок ключевых файлов в /etc/rixxx-panel/backups/YYYY-MM-DD-HHMMSS-<tag>/.
+# Снимок включает: config.json, Caddyfile, /etc/hysteria/config.yaml,
+# systemd-юнит панели. Это даёт точку отката после --repair или ручных правок.
+# Никогда не падает: если файла нет — просто пропускает.
+auto_backup() {
+  local tag="${1:-manual}"
+  local stamp
+  stamp="$(date +%Y-%m-%d-%H%M%S)"
+  local dir="${VERSION_DIR}/backups/${stamp}-${tag}"
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log_info "[dry-run] Создал бы бэкап в $dir"
+    BACKUP_DIR=""
+    return 0
+  fi
+
+  mkdir -p "$dir" || { log_warn "Не удалось создать $dir, бэкап пропущен"; BACKUP_DIR=""; return 1; }
+
+  local copied=0
+  for src in "$PANEL_CONFIG" "$CADDYFILE" "$HY2_CONFIG" \
+             "/etc/systemd/system/${PANEL_SERVICE_NAME}.service"; do
+    if [[ -f "$src" ]]; then
+      cp -a "$src" "$dir/" 2>/dev/null && copied=$((copied + 1))
+    fi
+  done
+
+  # Кладём marker-файл с метаданными.
+  cat > "$dir/.metadata" <<EOF
+created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+tag=${tag}
+panel_version=${CURRENT_VERSION:-unknown}
+files_copied=${copied}
+EOF
+
+  log_ok "Бэкап создан: $dir ($copied файл(ов))"
+  BACKUP_DIR="$dir"
+
+  # Чистим старые бэкапы — оставляем последние 10 (защита от засорения диска).
+  if [[ -d "${VERSION_DIR}/backups" ]]; then
+    local total
+    total="$(ls -1 "${VERSION_DIR}/backups" 2>/dev/null | wc -l)"
+    if [[ $total -gt 10 ]]; then
+      ls -1t "${VERSION_DIR}/backups" | tail -n +11 | while read -r old; do
+        rm -rf "${VERSION_DIR}/backups/${old}" 2>/dev/null || true
+      done
+    fi
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Утилита: rollback_from_backup
+# ─────────────────────────────────────────────────────────────────────────
+# Восстанавливает файлы из BACKUP_DIR (выставленного auto_backup) обратно
+# в их рабочие пути. Используется в --repair при провале валидации.
+rollback_from_backup() {
+  if [[ -z "${BACKUP_DIR:-}" || ! -d "${BACKUP_DIR}" ]]; then
+    log_warn "Нет бэкапа для отката (BACKUP_DIR пуст или не существует)"
+    return 1
+  fi
+  log_warn "Откат изменений из бэкапа: ${BACKUP_DIR}"
+  [[ -f "${BACKUP_DIR}/$(basename "$CADDYFILE")"   ]] && cp -a "${BACKUP_DIR}/$(basename "$CADDYFILE")"   "$CADDYFILE"   2>/dev/null && log_info "  • Caddyfile восстановлен"
+  [[ -f "${BACKUP_DIR}/$(basename "$HY2_CONFIG")"  ]] && cp -a "${BACKUP_DIR}/$(basename "$HY2_CONFIG")"  "$HY2_CONFIG"  2>/dev/null && log_info "  • Hysteria config восстановлен"
+  [[ -f "${BACKUP_DIR}/$(basename "$PANEL_CONFIG")" ]] && cp -a "${BACKUP_DIR}/$(basename "$PANEL_CONFIG")" "$PANEL_CONFIG" 2>/dev/null && log_info "  • config.json восстановлен"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Режим --repair: регенерация Caddyfile + Hy2 config из config.json.
+# ─────────────────────────────────────────────────────────────────────────
+# Алгоритм:
+#   1) auto_backup "repair" → /etc/rixxx-panel/backups/...
+#   2) Регенерируем Caddyfile из config.json (NaiveProxy + панель + masquerade).
+#   3) Регенерируем /etc/hysteria/config.yaml (auth + masquerade + TLS-block).
+#   4) caddy validate. Если упал — rollback_from_backup, exit 1.
+#   5) systemctl reload caddy / restart hysteria-server / restart panel.
+#   6) Smoke-test: systemctl is-active + curl -fsSL -o /dev/null https://<domain>.
+#
+# Контракт: НИКОГДА не трогает users (naiveUsers/hy2Users), сертификаты,
+# domain/email, sysctl. Только перегенерация шаблонов.
+do_repair() {
+  log_step "Режим --repair: регенерация Caddyfile + Hysteria config из config.json"
+
+  if [[ ! -f "$PANEL_CONFIG" ]]; then
+    log_err "config.json не найден: $PANEL_CONFIG"
+    return 1
+  fi
+
+  # 1) Автобэкап.
+  log_info "Шаг 1/5: автобэкап"
+  auto_backup "repair" || log_warn "Бэкап не создан — продолжаем на свой риск"
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log_info "[dry-run] Перегенерировал бы Caddyfile и Hy2 config"
+    log_info "[dry-run] Затем validate + reload + smoke-test"
+    return 0
+  fi
+
+  # 2) Регенерация через панель — она знает все шаблоны.
+  log_info "Шаг 2/5: регенерация Caddyfile + Hysteria config"
+  if [[ ! -f "$PANEL_DIR/panel/server/index.js" ]]; then
+    log_err "Файл панели не найден: $PANEL_DIR/panel/server/index.js"
+    return 1
+  fi
+
+  # Запускаем node-скрипт, который импортирует функции writeCaddyfile/writeHysteriaConfig
+  # «в lockstep» — мы не можем require() server/index.js (там app.listen на старте),
+  # поэтому регенерируем через тот же подход, что и в do_masquerade(): вытаскиваем
+  # cfg и перезаписываем по шаблонам.
+  node -e "
+    const fs=require('fs');
+    const yaml=require('js-yaml');
+    const cfg=JSON.parse(fs.readFileSync('$PANEL_CONFIG','utf8'));
+
+    // ── Caddyfile (только если NaiveProxy установлен) ──
+    if (cfg.stack && cfg.stack.naive && cfg.domain) {
+      const isExpired = (u) => u && u.expiresAt && Date.now() > new Date(u.expiresAt).getTime();
+      const lines = (cfg.naiveUsers || [])
+        .filter(u => !isExpired(u))
+        .map(u => '    basic_auth ' + u.username + ' ' + u.password)
+        .join('\n');
+      const disableH3 = cfg.stack.hy2;
+      const globalBlock = disableH3
+        ? '{\n  order forward_proxy before file_server\n  servers {\n    protocols h1 h2\n  }\n}'
+        : '{\n  order forward_proxy before file_server\n}';
+      const masqBlock = (cfg.masqueradeMode === 'mirror' && cfg.masqueradeUrl)
+        ? '  reverse_proxy ' + cfg.masqueradeUrl + ' {\n    header_up Host {upstream_hostport}\n  }'
+        : '  file_server {\n    root /var/www/html\n  }';
+      let content = globalBlock + '\n\n:443, ' + cfg.domain + ' {\n  tls ' + cfg.email + '\n\n  forward_proxy {\n' +
+        (lines || '    # no users yet') +
+        '\n    hide_ip\n    hide_via\n    probe_resistance\n  }\n\n' + masqBlock + '\n}\n';
+      const internalPort = process.env.PORT || 3000;
+      if (cfg.panelDomain && cfg.panelDomain !== cfg.domain && cfg.sshOnly !== 1) {
+        const panelEmail = cfg.panelEmail || cfg.email;
+        content += '\n' + cfg.panelDomain + ' {\n  tls ' + panelEmail +
+          '\n  encode gzip\n  reverse_proxy 127.0.0.1:' + internalPort + '\n}\n';
+      }
+      fs.writeFileSync('$CADDYFILE.new', content);
+      console.log('Caddyfile generated → $CADDYFILE.new');
+    }
+
+    // ── Hysteria config ──
+    if (cfg.stack && cfg.stack.hy2 && fs.existsSync('$HY2_CONFIG')) {
+      const isExpired = (u) => u && u.expiresAt && Date.now() > new Date(u.expiresAt).getTime();
+      const userpass = {};
+      (cfg.hy2Users || []).forEach(u => {
+        if (u.username && u.password && !isExpired(u)) userpass[u.username] = u.password;
+      });
+      const raw = fs.readFileSync('$HY2_CONFIG','utf8');
+      const base = yaml.load(raw) || {};
+      base.auth = base.auth || { type: 'userpass' };
+      base.auth.type = 'userpass';
+      base.auth.userpass = Object.keys(userpass).length ? userpass : { default: 'placeholder-please-change' };
+      if (cfg.masqueradeMode === 'mirror' && cfg.masqueradeUrl) {
+        base.masquerade = { type: 'proxy', proxy: { url: cfg.masqueradeUrl, rewriteHost: true } };
+      } else if (cfg.masqueradeMode === 'local') {
+        base.masquerade = { type: 'file', file: { dir: '/var/www/html' } };
+      }
+      fs.writeFileSync('$HY2_CONFIG.new', yaml.dump(base, { lineWidth: 120, quotingType: '\"' }));
+      console.log('Hysteria config generated → $HY2_CONFIG.new');
+    }
+  " || { log_err "Не удалось сгенерировать конфиги"; rollback_from_backup; return 1; }
+
+  # 3) Валидация Caddyfile.
+  log_info "Шаг 3/5: валидация Caddyfile"
+  if [[ -f "${CADDYFILE}.new" ]]; then
+    if command -v caddy >/dev/null 2>&1; then
+      if ! caddy validate --config "${CADDYFILE}.new" >/dev/null 2>&1; then
+        log_err "caddy validate упал на новом Caddyfile — откат"
+        rm -f "${CADDYFILE}.new" "${HY2_CONFIG}.new"
+        rollback_from_backup
+        return 1
+      fi
+      log_ok "Caddyfile валиден"
+    else
+      log_warn "caddy не найден — пропускаем validate (но atomic rename всё равно сделаем)"
+    fi
+    mv -f "${CADDYFILE}.new" "$CADDYFILE"
+  fi
+
+  if [[ -f "${HY2_CONFIG}.new" ]]; then
+    # YAML self-validate.
+    if ! python3 -c "import yaml,sys; yaml.safe_load(open('${HY2_CONFIG}.new'))" 2>/dev/null \
+       && ! node -e "require('js-yaml').load(require('fs').readFileSync('${HY2_CONFIG}.new','utf8'))" 2>/dev/null; then
+      log_err "Hysteria config невалиден (YAML parse failed) — откат"
+      rm -f "${HY2_CONFIG}.new"
+      rollback_from_backup
+      return 1
+    fi
+    mv -f "${HY2_CONFIG}.new" "$HY2_CONFIG"
+    log_ok "Hysteria config валиден"
+  fi
+
+  # 4) Reload сервисов.
+  log_info "Шаг 4/5: reload сервисов"
+  systemctl reload caddy >/dev/null 2>&1 \
+    || systemctl restart caddy >/dev/null 2>&1 \
+    || log_warn "Не удалось reload caddy — проверьте: systemctl status caddy"
+  if [[ $INSTALL_HAS_HY2 -eq 1 ]]; then
+    systemctl restart hysteria-server >/dev/null 2>&1 \
+      && log_ok "Hysteria2 перезапущен" \
+      || log_warn "Не удалось перезапустить hysteria-server"
+  fi
+  if pm2 describe "$PANEL_SERVICE_NAME" >/dev/null 2>&1; then
+    pm2 restart "$PANEL_SERVICE_NAME" --update-env >/dev/null 2>&1 \
+      && log_ok "Панель перезапущена через PM2"
+  elif systemctl is-active --quiet "$PANEL_SERVICE_NAME"; then
+    systemctl restart "$PANEL_SERVICE_NAME" \
+      && log_ok "Панель перезапущена через systemd"
+  fi
+
+  # 5) Smoke-test.
+  log_info "Шаг 5/5: smoke-test"
+  local fails=0
+  if [[ $INSTALL_HAS_NAIVE -eq 1 ]]; then
+    systemctl is-active --quiet caddy && log_ok "  caddy: active" || { log_err "  caddy: НЕ active"; fails=$((fails+1)); }
+  fi
+  if [[ $INSTALL_HAS_HY2 -eq 1 ]]; then
+    systemctl is-active --quiet hysteria-server && log_ok "  hysteria-server: active" || { log_err "  hysteria-server: НЕ active"; fails=$((fails+1)); }
+  fi
+  systemctl is-active --quiet "$PANEL_SERVICE_NAME" \
+    && log_ok "  ${PANEL_SERVICE_NAME}: active" \
+    || (pm2 describe "$PANEL_SERVICE_NAME" 2>/dev/null | grep -q online \
+        && log_ok "  ${PANEL_SERVICE_NAME}: online (pm2)" \
+        || { log_warn "  ${PANEL_SERVICE_NAME}: статус неопределён"; fails=$((fails+1)); })
+
+  echo ""
+  if [[ $fails -eq 0 ]]; then
+    log_ok "Repair завершён успешно. Бэкап: ${BACKUP_DIR:-—}"
+  else
+    log_warn "Repair завершён с предупреждениями ($fails). Бэкап: ${BACKUP_DIR:-—}"
+    log_info "Откат вручную: cp -a ${BACKUP_DIR}/* /etc/  # см. README"
+  fi
+  echo ""
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Режим --status: read-only вывод состояния установки.
+# ─────────────────────────────────────────────────────────────────────────
+# Собирает и красиво выводит:
+#   • Версия патчей (CURRENT_VERSION).
+#   • Установленные стеки (NaiveProxy / Hy2).
+#   • Режим доступа к панели (public / SSH-only / subdomain).
+#   • Режим маскировки (local / mirror <url>).
+#   • Статус сервисов (caddy / hysteria-server / panel).
+#   • TLS-сертификаты (наличие + срок).
+#   • Открытые порты (через ss/netstat).
+#   • Последние бэкапы (3 шт).
+do_status() {
+  echo ""
+  echo -e "${PURPLE}${BOLD}╔══════════════════════════════════════════════════════════╗${RESET}"
+  echo -e "${PURPLE}${BOLD}║                  СТАТУС УСТАНОВКИ                        ║${RESET}"
+  echo -e "${PURPLE}${BOLD}╚══════════════════════════════════════════════════════════╝${RESET}"
+  echo ""
+
+  # ── Версия ──
+  local v="(не установлено)"
+  [[ -f "$VERSION_FILE" ]] && v="$(tr -d '[:space:]' < "$VERSION_FILE")"
+  echo -e "  ${BOLD}Версия патчей:${RESET}  ${CYAN}${v}${RESET}  ${BLUE}(target: ${TARGET_VERSION})${RESET}"
+
+  # ── Стеки ──
+  local naive_state="${RED}нет${RESET}"
+  local hy2_state="${RED}нет${RESET}"
+  [[ $INSTALL_HAS_NAIVE -eq 1 ]] && naive_state="${GREEN}да${RESET}"
+  [[ $INSTALL_HAS_HY2   -eq 1 ]] && hy2_state="${GREEN}да${RESET}"
+  echo -e "  ${BOLD}NaiveProxy:${RESET}     ${naive_state}"
+  echo -e "  ${BOLD}Hysteria2:${RESET}      ${hy2_state}"
+
+  # ── Конфигурация (через node, чтобы корректно прочитать JSON) ──
+  if [[ -f "$PANEL_CONFIG" ]]; then
+    local cfg_dump
+    cfg_dump="$(node -e "
+      const c=require('$PANEL_CONFIG');
+      const out = {
+        domain: c.domain || '',
+        panelDomain: c.panelDomain || '',
+        accessMode: c.accessMode || '?',
+        sshOnly: c.sshOnly || 0,
+        listenHost: c.listenHost || '0.0.0.0',
+        masqueradeMode: c.masqueradeMode || 'local',
+        masqueradeUrl: c.masqueradeUrl || '',
+        naiveUsers: (c.naiveUsers || []).length,
+        hy2Users: (c.hy2Users || []).length,
+        internalPort: c.internalPort || 3000,
+      };
+      Object.entries(out).forEach(([k,v]) => console.log(k+'='+v));
+    " 2>/dev/null)"
+    echo ""
+    echo -e "  ${BOLD}Домены:${RESET}"
+    echo "$cfg_dump" | grep -E '^(domain|panelDomain)=' | while IFS='=' read -r k val; do
+      [[ -z "$val" ]] && val="${YELLOW}—${RESET}"
+      echo -e "    ${k}: ${val}"
+    done
+    local access_mode masq_mode masq_url ssh_only naive_count hy2_count
+    access_mode="$(echo "$cfg_dump" | grep -oP '(?<=^accessMode=).*' || echo '?')"
+    ssh_only="$(echo "$cfg_dump" | grep -oP '(?<=^sshOnly=).*' || echo '0')"
+    masq_mode="$(echo "$cfg_dump" | grep -oP '(?<=^masqueradeMode=).*' || echo 'local')"
+    masq_url="$(echo "$cfg_dump" | grep -oP '(?<=^masqueradeUrl=).*' || echo '')"
+    naive_count="$(echo "$cfg_dump" | grep -oP '(?<=^naiveUsers=).*' || echo '0')"
+    hy2_count="$(echo "$cfg_dump" | grep -oP '(?<=^hy2Users=).*' || echo '0')"
+
+    echo ""
+    echo -e "  ${BOLD}Доступ к панели:${RESET}"
+    case "$access_mode" in
+      1) echo -e "    режим 1 — Nginx на :8080" ;;
+      2) echo -e "    режим 2 — прямой :3000" ;;
+      3) echo -e "    режим 3 — отдельный поддомен (Caddy + LE)" ;;
+      *) echo -e "    режим: ${YELLOW}неизвестен${RESET}" ;;
+    esac
+    if [[ "$ssh_only" == "1" ]]; then
+      echo -e "    SSH-only: ${YELLOW}${BOLD}ВКЛ${RESET} (панель только через SSH-туннель)"
+    else
+      echo -e "    SSH-only: ${GREEN}выкл${RESET}"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Маскировка:${RESET}"
+    if [[ "$masq_mode" == "mirror" && -n "$masq_url" ]]; then
+      echo -e "    режим: ${CYAN}mirror${RESET} → ${masq_url}"
+    else
+      echo -e "    режим: ${GREEN}local${RESET} (страница «Loading»)"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Пользователи:${RESET}"
+    echo -e "    NaiveProxy: ${naive_count}"
+    echo -e "    Hy2:        ${hy2_count}"
+  fi
+
+  # ── Статус сервисов ──
+  echo ""
+  echo -e "  ${BOLD}Сервисы:${RESET}"
+  for svc in caddy hysteria-server "$PANEL_SERVICE_NAME"; do
+    if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
+      if systemctl is-active --quiet "$svc"; then
+        echo -e "    ${GREEN}●${RESET} ${svc}: active"
+      else
+        echo -e "    ${RED}●${RESET} ${svc}: $(systemctl is-active "$svc" 2>/dev/null || echo 'inactive')"
+      fi
+    elif [[ "$svc" == "$PANEL_SERVICE_NAME" ]] && command -v pm2 >/dev/null 2>&1; then
+      if pm2 describe "$svc" 2>/dev/null | grep -q online; then
+        echo -e "    ${GREEN}●${RESET} ${svc}: online (pm2)"
+      else
+        echo -e "    ${YELLOW}●${RESET} ${svc}: не найден"
+      fi
+    else
+      echo -e "    ${YELLOW}○${RESET} ${svc}: не установлен"
+    fi
+  done
+
+  # ── TLS-сертификаты ──
+  echo ""
+  echo -e "  ${BOLD}TLS-сертификаты Caddy:${RESET}"
+  local cert_found=0
+  for root in /var/lib/caddy/.local/share/caddy/certificates /root/.local/share/caddy/certificates; do
+    [[ ! -d "$root" ]] && continue
+    while IFS= read -r crt; do
+      [[ -z "$crt" ]] && continue
+      cert_found=1
+      local domain_from_path
+      domain_from_path="$(basename "$crt" .crt)"
+      local exp
+      exp="$(openssl x509 -in "$crt" -noout -enddate 2>/dev/null | cut -d= -f2 || echo '?')"
+      echo -e "    • ${domain_from_path}: до ${exp}"
+    done < <(find "$root" -type f -name '*.crt' 2>/dev/null | head -5)
+  done
+  [[ $cert_found -eq 0 ]] && echo -e "    ${YELLOW}—${RESET} сертификаты не найдены"
+
+  # ── Открытые порты ──
+  echo ""
+  echo -e "  ${BOLD}Слушающие порты (443/3000/8080):${RESET}"
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntu 2>/dev/null | awk 'NR>1 {split($5,a,":"); p=a[length(a)]; if (p=="443"||p=="3000"||p=="8080") print "    "$1" "$5}' | sort -u
+  fi
+
+  # ── Последние бэкапы ──
+  echo ""
+  echo -e "  ${BOLD}Последние бэкапы:${RESET}"
+  if [[ -d "${VERSION_DIR}/backups" ]]; then
+    local count
+    count="$(ls -1 "${VERSION_DIR}/backups" 2>/dev/null | wc -l)"
+    if [[ $count -gt 0 ]]; then
+      ls -1t "${VERSION_DIR}/backups" 2>/dev/null | head -3 | while read -r b; do
+        echo -e "    • ${b}"
+      done
+      echo -e "    ${BLUE}(всего: ${count}, путь: ${VERSION_DIR}/backups/)${RESET}"
+    else
+      echo -e "    ${YELLOW}—${RESET} нет"
+    fi
+  else
+    echo -e "    ${YELLOW}—${RESET} нет"
+  fi
+
+  echo ""
+  return 0
+}
+
 register_migration() {
   MIGRATIONS_VERSIONS+=("$1")
   MIGRATIONS_FUNCS+=("$2")
@@ -560,6 +1015,23 @@ if [[ $MASQUERADE_MODE_FLAG -eq 1 ]]; then
   else
     exit 1
   fi
+fi
+
+# ── 5d. Режим --repair: регенерация Caddyfile + Hy2 config из config.json ──
+# Разовая операция, идемпотентная. Перед изменениями — autobackup.
+if [[ $REPAIR_MODE -eq 1 ]]; then
+  if do_repair; then
+    exit 0
+  else
+    exit 1
+  fi
+fi
+
+# ── 5e. Режим --status: read-only вывод состояния установки ─────────────
+# Запускается даже без root (см. early root-check выше). Ничего не меняет.
+if [[ $STATUS_MODE -eq 1 ]]; then
+  do_status
+  exit 0
 fi
 
 # ── 6. Применение миграций ─────────────────────────────────────────────

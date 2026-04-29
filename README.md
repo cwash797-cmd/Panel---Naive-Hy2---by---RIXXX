@@ -39,6 +39,10 @@ bash update.sh --dry-run               # показать что будет сд
 bash update.sh --force                 # перепрогнать миграции даже если version совпадает
 bash update.sh --expose <panel.domain> # вернуть публичный доступ к панели после SSH-only
 bash update.sh --masquerade            # сменить режим маскировки (local | mirror)
+bash update.sh --repair                # регенерация Caddyfile + Hy2 config из config.json
+                                       # (с автобэкапом и rollback при ошибке)
+bash update.sh --status                # диагностика: версия, сервисы, TLS, порты
+                                       # (read-only, работает даже без root)
 bash update.sh --help                  # справка
 ```
 
@@ -304,9 +308,73 @@ journalctl -u hysteria-server -f
 
 Если что-то не так — заходите туда первым делом.
 
+### Из командной строки: `update.sh --status`
+
+Одна команда показывает всё состояние установки — версия патчей, статус сервисов (caddy/hysteria/panel), TLS-сертификаты и их сроки, открытые порты, режим маскировки и режим доступа к панели:
+
+```bash
+sudo bash update.sh --status
+# или вообще без root (read-only):
+bash update.sh --status
+```
+
+Пример вывода:
+```
+  Версия патчей:  1.3.0  (target: 1.3.0)
+  NaiveProxy:     да
+  Hysteria2:      да
+  Доступ к панели:
+    режим 3 — отдельный поддомен (Caddy + LE)
+    SSH-only: выкл
+  Маскировка:
+    режим: mirror → https://www.apple.com
+  Сервисы:
+    ● caddy: active
+    ● hysteria-server: active
+    ● panel-naive-hy2: active
+  TLS-сертификаты Caddy:
+    • example.com: до Jul 27 12:34:56 2026 GMT
+    • panel.example.com: до Jul 27 12:34:56 2026 GMT
+```
+
+### Восстановление: `update.sh --repair`
+
+Если что-то сломалось (например, Caddyfile повреждён ручными правками, или панель перестала отвечать), эта команда регенерирует `Caddyfile` и `/etc/hysteria/config.yaml` **из `config.json`**, не трогая пользователей, домены и сертификаты:
+
+```bash
+sudo bash update.sh --repair
+```
+
+**Что происходит:**
+1. **Автобэкап** в `/etc/rixxx-panel/backups/YYYY-MM-DD-HHMMSS-repair/` — сохраняются Caddyfile, hysteria config, panel config, systemd-юнит. Хранятся последние 10 бэкапов, старые удаляются.
+2. **Регенерация** Caddyfile и Hy2 config из шаблонов на основе текущего `config.json`.
+3. **Валидация** — `caddy validate` для Caddyfile, YAML-парсинг для Hy2. Если новый конфиг невалиден → автоматический rollback из бэкапа.
+4. **Atomic rename** временных файлов в рабочие пути (на ext4/xfs это атомарная операция).
+5. **Reload** сервисов: caddy, hysteria-server, панель.
+6. **Smoke-test** — `systemctl is-active` для всех сервисов.
+
+### Smoke-test после установки
+
+`install.sh` теперь в самом конце автоматически проверяет, что всё работает:
+- `caddy validate --config /etc/caddy/Caddyfile`
+- `systemctl is-active caddy / hysteria-server / panel-naive-hy2`
+- `curl http://127.0.0.1:3000/` (панель отвечает локально)
+- `curl https://<proxy.domain>/` и `https://<panel.domain>/` (TLS работает)
+
+При обнаружении проблем выводится **конкретная ошибка** и подсказка: `bash update.sh --repair` или `bash update.sh --status`.
+
 ---
 
 ## 📜 История изменений
+
+### v1.3 — Стабильность и диагностика (PR #4)
+- 🆕 **`update.sh --repair`** — регенерация Caddyfile + Hy2 config из `config.json` с автобэкапом, валидацией и rollback при ошибке
+- 🆕 **`update.sh --status`** — одна команда показывает всё состояние (версия, сервисы, TLS, порты, режимы); работает без root
+- 🆕 **Автобэкап** в `/etc/rixxx-panel/backups/` — все ключевые файлы сохраняются перед изменениями, хранятся последние 10
+- 🆕 **Smoke-test в `install.sh`** — после установки автоматически проверяется работоспособность (caddy validate, systemctl is-active, curl на домены)
+- 🐞 **Атомарная защита `writeCaddyfile()`**: запись через temp-файл → `caddy validate` → `atomic rename`. На любой ошибке — автоматический rollback из `.last`-бэкапа. Это окончательно закрывает баг с потерей panel-блока при добавлении Naive-юзеров.
+- 🐞 **Атомарная защита `writeHysteriaConfig()`**: temp-файл + self-validate (yaml.load) + atomic rename + rollback из `.last`.
+- 🐞 **`writeCaddyfile()` уважает `sshOnly=1`** — panel-блок не добавляется в SSH-only режиме даже при перегенерации (раньше мог восстанавливаться при добавлении юзеров).
 
 ### v1.2 — Исправление параллельной работы Naive + Hy2
 - 🐞 **Hy2 не запускался когда был Naive**: Caddy по умолчанию занимал UDP/443 для HTTP/3 (QUIC), не давая Hy2 биндиться. Теперь при установке обоих протоколов в `Caddyfile` добавляется `servers { protocols h1 h2 }` — HTTP/3 в Caddy отключён, UDP/443 свободен для Hy2.
