@@ -367,6 +367,11 @@ sudo bash update.sh --repair
 
 ## 📜 История изменений
 
+### v1.3.2 — Hotfix: masquerade (PR #6)
+- 🐞 **`update.sh --masquerade` падал с `Cannot find module 'js-yaml'`**: Node-скрипт запускался из `/root/`, где нет `node_modules`. Теперь все три Node-вызова в `update.sh` (`do_masquerade()`, `do_repair()`, YAML-валидация в atomic write) обёрнуты в `(cd "$PANEL_DIR/panel" && node -e "...")` — модули резолвятся корректно.
+- 🐞 **Mirror на крупных сайтах (GitHub, Apple, Cloudflare и т.д.) не работал**: они блокируют `reverse_proxy`-запросы от чужих серверов, клиенты NaiveProxy получали `502 / EOF`. В рекомендациях `install.sh` и `update.sh --masquerade` заменены примеры на статичные сайты: `iana.org`, `ietf.org`, `demo.nginx.com`. Дефолт при пустом вводе теперь `https://www.iana.org`.
+- ⚠️ **Предупреждение в установщике**: при выборе режима mirror теперь показывается явное сообщение про крупные сайты и риск 502/EOF — пользователи больше не будут случайно ставить github.com.
+
 ### v1.3.1 — UI-хотфикс (PR #5)
 - 🆕 **Динамическая версия в панели**: новый эндпоинт `GET /api/system/version` читает `/etc/rixxx-panel/version`, на странице «Настройки → Информация о панели» теперь отображается актуальная версия (раньше было захардкожено `1.0.0`).
 - 🆕 **Подсказки в «Диагностике»**: добавлен блок CLI-инструментов со ссылками на `bash update.sh --status` и `sudo bash update.sh --repair` (с примером `--dry-run`).
