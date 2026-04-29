@@ -188,6 +188,38 @@ echo ""
 read -rp "  Домен (например vpn.yourdomain.com): " PROXY_DOMAIN
 read -rp "  Email для Let's Encrypt (TLS): " PROXY_EMAIL
 
+# ── A4. Маскировка (masquerade) ─────────────────────────────────────────
+# Маскировка — это что увидит случайный посетитель домена в браузере (HTTPS)
+# или сторонний клиент, отправивший запрос на UDP/443 без правильной аутентификации.
+# Цель: сделать сервер похожим на обычный сайт, а не на VPN-эндпоинт.
+echo ""
+echo -e "${BOLD}🎭 Маскировка (камуфляж домена):${RESET}"
+echo ""
+echo -e "  ${CYAN}1)${RESET} Локальная страница ${BOLD}«Loading»${RESET} ${GREEN}(надёжно, без внешних зависимостей)${RESET}"
+echo -e "      ${YELLOW}→ Простая статичная HTML-страница, всегда работает.${RESET}"
+echo -e "  ${CYAN}2)${RESET} ${BOLD}Зеркалирование${RESET} внешнего сайта (reverse_proxy)"
+echo -e "      ${YELLOW}→ Caddy и Hy2 будут отдавать содержимое указанного URL.${RESET}"
+echo -e "      ${RED}⚠  Если сайт станет недоступен — посетители получат 502.${RESET}"
+echo -e "      ${YELLOW}→ Рекомендуемые: https://www.apple.com, https://github.com, https://www.amd.com${RESET}"
+echo ""
+read -rp "Ваш выбор [1/2, по умолчанию 1]: " MASQUERADE_MODE_INPUT
+MASQUERADE_MODE_INPUT="${MASQUERADE_MODE_INPUT:-1}"
+MASQUERADE_MODE="local"
+MASQUERADE_URL=""
+if [[ "$MASQUERADE_MODE_INPUT" == "2" ]]; then
+  echo ""
+  read -rp "  URL для зеркалирования (например https://www.apple.com): " MASQUERADE_URL
+  # Простая валидация: должно начинаться с http:// или https://
+  if [[ ! "$MASQUERADE_URL" =~ ^https?:// ]]; then
+    log_warn "URL должен начинаться с http:// или https://. Использую дефолт https://www.apple.com"
+    MASQUERADE_URL="https://www.apple.com"
+  fi
+  MASQUERADE_MODE="mirror"
+  log_info "Маскировка: зеркалирование ${MASQUERADE_URL}"
+else
+  log_info "Маскировка: локальная страница «Loading»"
+fi
+
 # Проверка что домен панели (если задан) отличается от домена прокси.
 # Оба на 443/tcp (SNI разный) — совпадение сломает Caddy и/или маскировку.
 if [[ "$ACCESS_MODE" == "3" && -n "$PANEL_DOMAIN" && "$PANEL_DOMAIN" == "$PROXY_DOMAIN" ]]; then
@@ -393,9 +425,17 @@ HTMLEOF
     printf '    hide_via\n'
     printf '    probe_resistance\n'
     printf '  }\n\n'
-    printf '  file_server {\n'
-    printf '    root /var/www/html\n'
-    printf '  }\n'
+    # Маскировка: local → file_server (статичная страница), mirror → reverse_proxy <url>.
+    # При mirror Caddy сам подменит Host/SNI и проксирует TLS-запросы на upstream.
+    if [[ "$MASQUERADE_MODE" == "mirror" && -n "$MASQUERADE_URL" ]]; then
+      printf '  reverse_proxy %s {\n' "${MASQUERADE_URL}"
+      printf '    header_up Host {upstream_hostport}\n'
+      printf '  }\n'
+    else
+      printf '  file_server {\n'
+      printf '    root /var/www/html\n'
+      printf '  }\n'
+    fi
     printf '}\n'
 
     # ── Второй site-блок: панель на отдельном поддомене (ACCESS_MODE=3) ──
@@ -548,15 +588,30 @@ auth:
     default: "${HY2_PASS}"
 
 # Маскировка трафика: отдаёт ТУ ЖЕ страницу что Caddy на TCP.
-# type:file надёжнее чем proxy:bing.com — нет внешних зависимостей,
-# не будет ошибок H3_GENERAL_PROTOCOL_ERROR в логах.
+# Режим выбирается интерактивно при установке (см. MASQUERADE_MODE).
+HYCFGEOF
+
+# Дописываем masquerade-секцию в зависимости от выбранного режима.
+if [[ "$MASQUERADE_MODE" == "mirror" && -n "$MASQUERADE_URL" ]]; then
+  cat >> /etc/hysteria/config.yaml << HYMASQEOF
+masquerade:
+  type: proxy
+  proxy:
+    url: ${MASQUERADE_URL}
+    rewriteHost: true
+
+# TLS
+HYMASQEOF
+else
+  cat >> /etc/hysteria/config.yaml << HYMASQEOF
 masquerade:
   type: file
   file:
     dir: /var/www/html
 
 # TLS
-HYCFGEOF
+HYMASQEOF
+fi
 
   if [[ "$HY_TLS_MODE" == "caddy" ]]; then
     # КРИТИЧНО: Caddy может получить сертификат от ЛЮБОГО CA
@@ -856,6 +911,8 @@ if [[ ! -f "${PANEL_DIR}/panel/data/config.json" ]]; then
   "accessMode":  "${ACCESS_MODE}",
   "sshOnly":     ${SSH_ONLY:-0},
   "listenHost":  "${LISTEN_HOST:-0.0.0.0}",
+  "masqueradeMode": "${MASQUERADE_MODE:-local}",
+  "masqueradeUrl":  "${MASQUERADE_URL:-}",
   "serverIp": "${SERVER_IP}",
   "arch": "${MACHINE_ARCH}",
   "adminPassword": "",

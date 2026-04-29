@@ -13,6 +13,9 @@
 #    --expose <domain>    восстановить публичный доступ к панели через
 #                         поддомен <domain> (Caddy + LE), вернуть LISTEN_HOST=0.0.0.0,
 #                         открыть UFW-порты. Используется после установки в SSH-only.
+#    --masquerade         интерактивно сменить режим маскировки на существующей
+#                         установке (local | mirror <url>). Перегенерирует
+#                         Caddyfile и Hy2 config, перезапускает сервисы.
 # ═══════════════════════════════════════════════════════════════════════
 
 set -uo pipefail
@@ -21,7 +24,7 @@ export DEBIAN_FRONTEND=noninteractive
 # ── Версия, до которой довести систему этим запуском ────────────────────
 # При добавлении новой миграции — увеличиваем TARGET_VERSION и регистрируем
 # функцию в migration_registry().
-TARGET_VERSION="1.1.0"
+TARGET_VERSION="1.2.0"
 
 # ── Пути ────────────────────────────────────────────────────────────────
 PANEL_DIR="/opt/panel-naive-hy2"
@@ -38,6 +41,7 @@ DRY_RUN=0
 FORCE=0
 EXPOSE_DOMAIN=""
 EXPOSE_MODE=0
+MASQUERADE_MODE_FLAG=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
@@ -51,8 +55,9 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
+    --masquerade) MASQUERADE_MODE_FLAG=1; shift ;;
     --help|-h)
-      sed -n '2,18p' "$0"
+      sed -n '2,21p' "$0"
       exit 0
       ;;
     *)
@@ -177,11 +182,9 @@ MIGRATIONS_FUNCS=()
 
 migration_registry() {
   # PR #2: SSH-only режим (LISTEN_HOST=127.0.0.1).
-  # ВАЖНО: миграция НЕ применяется автоматически — только показывает информацию.
-  # Чтобы перейти в SSH-only режим, пользователь явно подтверждает интерактивно
-  # (или вызывает update.sh с флагом --ssh-only в будущих версиях).
   register_migration "1.1.0" migrate_listen_localhost
-  # PR #3 добавит: register_migration "1.2.0" migrate_masquerade_choice
+  # PR #3: Masquerade choice (local | mirror).
+  register_migration "1.2.0" migrate_masquerade_default
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -230,6 +233,182 @@ migrate_listen_localhost() {
   log_info "  /etc/systemd/system/panel-naive-hy2.service (Environment=LISTEN_HOST=127.0.0.1)"
   log_info "и перезапустите: systemctl restart panel-naive-hy2"
   log_info "Восстановление публичного доступа: bash update.sh --expose <panel-domain>"
+  echo ""
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Миграция 1.2.0: Masquerade choice (local | mirror)
+# ─────────────────────────────────────────────────────────────────────────
+# Что делает:
+#   • Идемпотентно дописывает в config.json дефолтные masqueradeMode="local"
+#     и masqueradeUrl="" — чтобы новые версии panel/server/index.js знали
+#     про режим маскировки и не ломали уже работающий конфиг.
+#   • НЕ переключает существующие установки автоматически: даже если в
+#     Caddyfile стоит file_server, мы оставляем как есть (масquerade-режим
+#     "local" совпадает с текущим поведением).
+#   • Чтобы СМЕНИТЬ маскировку — пользователь явно вызывает:
+#       bash update.sh --masquerade
+#     (интерактивный prompt: 1=local, 2=mirror <url>).
+#
+# Контракт: не трогает users/certs/sysctl, только пишет в config.json.
+migrate_masquerade_default() {
+  if [[ ! -f "$PANEL_CONFIG" ]]; then
+    log_warn "config.json не найден — пропускаю миграцию 1.2.0"
+    return 0
+  fi
+
+  if ! grep -qE '"masqueradeMode"' "$PANEL_CONFIG"; then
+    log_info "Добавляю в config.json дефолтные masqueradeMode / masqueradeUrl"
+    node -e "
+      const fs=require('fs');
+      const p='$PANEL_CONFIG';
+      const c=JSON.parse(fs.readFileSync(p,'utf8'));
+      if (typeof c.masqueradeMode === 'undefined') c.masqueradeMode = 'local';
+      if (typeof c.masqueradeUrl  === 'undefined') c.masqueradeUrl  = '';
+      fs.writeFileSync(p, JSON.stringify(c, null, 2));
+    " || { log_err "Не удалось обновить config.json"; return 1; }
+    log_ok "config.json обновлён (masqueradeMode=local)"
+  else
+    log_skip "masqueradeMode уже задан в config.json"
+  fi
+
+  echo ""
+  log_info "${BOLD}Маскировка${RESET} теперь настраиваемая (2 варианта):"
+  log_info "  ${BOLD}1)${RESET} Локальная страница «Loading» (текущий режим)"
+  log_info "  ${BOLD}2)${RESET} Зеркалирование внешнего сайта (apple.com / github.com / amd.com)"
+  log_info "Сменить можно командой: ${BOLD}bash update.sh --masquerade${RESET}"
+  echo ""
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Режим --masquerade: интерактивная смена маскировки на существующей установке.
+# ─────────────────────────────────────────────────────────────────────────
+# Делает:
+#   1) Спрашивает: 1=local или 2=mirror <url>.
+#   2) Обновляет config.json (masqueradeMode/masqueradeUrl).
+#   3) Перегенерирует Caddyfile (через панель — она сама вызовет writeCaddyfile()
+#      при следующем апдейте users; чтобы применилось сразу — restart панели,
+#      она при старте сделает migrate-блок и не перепишет Caddyfile, поэтому
+#      делаем sed-патч прямо здесь как fallback).
+#   4) Перегенерирует /etc/hysteria/config.yaml (sed/yq на месте).
+#   5) Reload Caddy + Hy2 + panel.
+do_masquerade() {
+  log_step "Режим --masquerade: смена маскировки на существующей установке"
+
+  if [[ ! -f "$PANEL_CONFIG" ]]; then
+    log_err "config.json не найден: $PANEL_CONFIG"
+    return 1
+  fi
+
+  echo ""
+  echo -e "${BOLD}Выберите режим маскировки:${RESET}"
+  echo -e "  ${CYAN}1)${RESET} Локальная страница ${BOLD}«Loading»${RESET} ${GREEN}(надёжно, без внешних зависимостей)${RESET}"
+  echo -e "  ${CYAN}2)${RESET} ${BOLD}Зеркалирование${RESET} внешнего сайта (reverse_proxy)"
+  echo -e "      ${RED}⚠  Если сайт станет недоступен — посетители получат 502.${RESET}"
+  echo -e "      ${YELLOW}→ Рекомендуемые: https://www.apple.com, https://github.com, https://www.amd.com${RESET}"
+  echo ""
+  read -rp "Ваш выбор [1/2]: " _MASQ_INPUT
+  _MASQ_INPUT="${_MASQ_INPUT:-1}"
+
+  local new_mode="local"
+  local new_url=""
+  if [[ "$_MASQ_INPUT" == "2" ]]; then
+    read -rp "  URL для зеркалирования (например https://www.apple.com): " new_url
+    if [[ ! "$new_url" =~ ^https?:// ]]; then
+      log_err "URL должен начинаться с http:// или https://"
+      return 1
+    fi
+    new_mode="mirror"
+  fi
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log_info "[dry-run] Сменил бы masqueradeMode=${new_mode}, masqueradeUrl=${new_url}"
+    return 0
+  fi
+
+  # 1) Обновляем config.json.
+  node -e "
+    const fs=require('fs');
+    const p='$PANEL_CONFIG';
+    const c=JSON.parse(fs.readFileSync(p,'utf8'));
+    c.masqueradeMode = '$new_mode';
+    c.masqueradeUrl  = '$new_url';
+    fs.writeFileSync(p, JSON.stringify(c, null, 2));
+  " || { log_err "Не удалось обновить config.json"; return 1; }
+  log_ok "config.json обновлён (masqueradeMode=${new_mode}, masqueradeUrl=${new_url:-—})"
+
+  # 2) Перезапускаем панель — её writeCaddyfile()/writeHysteriaConfig() при
+  # следующем изменении users применят новый masquerade. Но чтобы применилось
+  # сразу, дополнительно дёргаем "перегенерация" через node одноразово:
+  if [[ -f "$PANEL_DIR/panel/server/index.js" ]]; then
+    log_info "Перегенерация Caddyfile + Hysteria config через панель..."
+    node -e "
+      process.chdir('$PANEL_DIR/panel');
+      const fs=require('fs');
+      const yaml=require('js-yaml');
+      const cfg=JSON.parse(fs.readFileSync('$PANEL_CONFIG','utf8'));
+
+      // ── Caddyfile (NaiveProxy) ──
+      if (cfg.stack && cfg.stack.naive && cfg.domain && fs.existsSync('$CADDYFILE')) {
+        const masqBlock = (cfg.masqueradeMode === 'mirror' && cfg.masqueradeUrl)
+          ? \`  reverse_proxy \${cfg.masqueradeUrl} {\n    header_up Host {upstream_hostport}\n  }\`
+          : \`  file_server {\n    root /var/www/html\n  }\`;
+        let c = fs.readFileSync('$CADDYFILE','utf8');
+        // Заменяем существующий file_server { ... } блок ИЛИ reverse_proxy { ... }
+        // (только тот, что внутри основного site-блока с forward_proxy).
+        c = c.replace(
+          /( {2}file_server \{[^}]*\}|  reverse_proxy [^\n]+\{[^}]*\})/,
+          masqBlock
+        );
+        fs.writeFileSync('$CADDYFILE', c);
+        console.log('Caddyfile updated.');
+      }
+
+      // ── Hysteria config ──
+      if (cfg.stack && cfg.stack.hy2 && fs.existsSync('$HY2_CONFIG')) {
+        const raw = fs.readFileSync('$HY2_CONFIG','utf8');
+        const base = yaml.load(raw);
+        if (base && typeof base === 'object') {
+          if (cfg.masqueradeMode === 'mirror' && cfg.masqueradeUrl) {
+            base.masquerade = { type: 'proxy', proxy: { url: cfg.masqueradeUrl, rewriteHost: true } };
+          } else {
+            base.masquerade = { type: 'file', file: { dir: '/var/www/html' } };
+          }
+          fs.writeFileSync('$HY2_CONFIG', yaml.dump(base, { lineWidth: 120, quotingType: '\"' }));
+          console.log('Hysteria config updated.');
+        }
+      }
+    " || { log_err "Не удалось перегенерировать конфиги"; return 1; }
+    log_ok "Caddyfile и Hysteria config обновлены"
+  fi
+
+  # 3) Reload Caddy + Hy2 + panel.
+  log_info "Reload Caddy и Hy2..."
+  caddy validate --config "$CADDYFILE" >/dev/null 2>&1 \
+    && systemctl reload caddy >/dev/null 2>&1 \
+    || log_warn "Caddy reload пропущен (validate выдал предупреждение)"
+  systemctl restart hysteria-server >/dev/null 2>&1 \
+    && log_ok "Hysteria2 перезапущен" \
+    || log_warn "Не удалось перезапустить hysteria-server"
+
+  if pm2 describe "$PANEL_SERVICE_NAME" >/dev/null 2>&1; then
+    pm2 restart "$PANEL_SERVICE_NAME" --update-env >/dev/null 2>&1 \
+      && log_ok "Панель перезапущена через PM2"
+  elif systemctl is-active --quiet "$PANEL_SERVICE_NAME"; then
+    systemctl restart "$PANEL_SERVICE_NAME" \
+      && log_ok "Панель перезапущена через systemd"
+  fi
+
+  echo ""
+  log_ok "Маскировка изменена."
+  if [[ "$new_mode" == "mirror" ]]; then
+    log_info "Сейчас домен зеркалирует: ${BOLD}${new_url}${RESET}"
+    log_info "Проверьте: curl -I https://${BOLD}<your-domain>${RESET}/"
+  else
+    log_info "Сейчас домен отдаёт локальную страницу «Loading»"
+  fi
   echo ""
   return 0
 }
@@ -367,6 +546,16 @@ migration_registry
 # не привязанная к версии. После выполнения скрипт завершается с кодом 0.
 if [[ $EXPOSE_MODE -eq 1 ]]; then
   if do_expose; then
+    exit 0
+  else
+    exit 1
+  fi
+fi
+
+# ── 5c. Режим --masquerade: интерактивная смена маскировки ─────────────
+# Также разовая операция — отдельно от миграций.
+if [[ $MASQUERADE_MODE_FLAG -eq 1 ]]; then
+  if do_masquerade; then
     exit 0
   else
     exit 1
