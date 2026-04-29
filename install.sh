@@ -150,6 +150,36 @@ if [[ "$ACCESS_MODE" == "3" ]]; then
   read -rp "  Email для Let's Encrypt (SSL панели): " PANEL_EMAIL_SSL
 fi
 
+# ── A2.1. SSH-only режим (доступ к панели только через SSH-туннель) ─────
+echo ""
+echo -e "${BOLD}Сделать панель доступной только через SSH-туннель?${RESET}"
+echo -e "  ${YELLOW}→ Панель свяжется на 127.0.0.1:${INTERNAL_PORT:-3000} и не будет видна из Интернета.${RESET}"
+echo -e "  ${YELLOW}→ Для доступа: ${BOLD}ssh -L 8080:127.0.0.1:${INTERNAL_PORT:-3000} root@${SERVER_IP}${RESET}${YELLOW}, затем http://localhost:8080${RESET}"
+echo -e "  ${YELLOW}→ Это максимальная защита: панель невозможно сбрутить из вне.${RESET}"
+echo ""
+read -rp "Включить SSH-only режим? [y/N]: " _SSH_ONLY
+SSH_ONLY="0"
+LISTEN_HOST="0.0.0.0"
+if [[ "${_SSH_ONLY,,}" == "y" || "${_SSH_ONLY,,}" == "yes" ]]; then
+  SSH_ONLY="1"
+  LISTEN_HOST="127.0.0.1"
+  log_info "SSH-only режим включён: панель будет слушать только на 127.0.0.1"
+  if [[ "$ACCESS_MODE" == "3" ]]; then
+    echo ""
+    echo -e "${YELLOW}  ⚠  ACCESS_MODE=3 + SSH-only:${RESET}"
+    echo -e "${YELLOW}     Поддомен ${PANEL_DOMAIN} НЕ будет добавлен в Caddyfile,${RESET}"
+    echo -e "${YELLOW}     панель будет доступна ТОЛЬКО через SSH-туннель.${RESET}"
+    echo -e "${YELLOW}     Чтобы вернуть публичный доступ позже:${RESET}"
+    echo -e "${BOLD}        bash update.sh --expose ${PANEL_DOMAIN}${RESET}"
+    echo ""
+    read -rp "Продолжить? [y/N]: " _CONFIRM_SSH3
+    if [[ "${_CONFIRM_SSH3,,}" != "y" && "${_CONFIRM_SSH3,,}" != "yes" ]]; then
+      log_info "Отменено пользователем."
+      exit 1
+    fi
+  fi
+fi
+
 # ── A3. Параметры прокси ────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}Параметры прокси:${RESET}"
@@ -373,7 +403,10 @@ HTMLEOF
     # Порт 443/tcp один, оба сайта живут параллельно. UDP/443 свободен для Hy2.
     # reverse_proxy в Caddy сам добавит нужные заголовки (Host, X-Forwarded-*),
     # поэтому дополнительные header_up не нужны (иначе Caddy пишет warn в логах).
-    if [[ "$ACCESS_MODE" == "3" && -n "$PANEL_DOMAIN" ]]; then
+    # SSH-only режим: НЕ добавляем поддомен панели в Caddyfile.
+    # Панель слушает только 127.0.0.1, поддомен сделает 502, а с SSH-туннелем
+    # не нужен публичный HTTPS вообще. Восстановить можно: bash update.sh --expose ...
+    if [[ "$ACCESS_MODE" == "3" && -n "$PANEL_DOMAIN" && "$SSH_ONLY" != "1" ]]; then
       printf '\n'
       printf '%s {\n' "${PANEL_DOMAIN}"
       printf '  tls %s\n' "${PANEL_EMAIL_SSL:-${PROXY_EMAIL}}"
@@ -821,6 +854,8 @@ if [[ ! -f "${PANEL_DIR}/panel/data/config.json" ]]; then
   "panelDomain": "${PANEL_DOMAIN}",
   "panelEmail":  "${PANEL_EMAIL_SSL}",
   "accessMode":  "${ACCESS_MODE}",
+  "sshOnly":     ${SSH_ONLY:-0},
+  "listenHost":  "${LISTEN_HOST:-0.0.0.0}",
   "serverIp": "${SERVER_IP}",
   "arch": "${MACHINE_ARCH}",
   "adminPassword": "",
@@ -846,6 +881,14 @@ ufw allow 443/udp >/dev/null 2>&1 || true
 echo "y" | ufw enable >/dev/null 2>&1 || ufw --force enable >/dev/null 2>&1 || true
 log_ok "UFW: 22, 80, 443/tcp, 443/udp открыты"
 
+# SSH-only: явно закрываем публичные порты панели на UFW.
+# LISTEN_HOST=127.0.0.1 уже не пускает извне, но deny — это второй контур защиты.
+if [[ "$SSH_ONLY" == "1" ]]; then
+  ufw deny 3000/tcp >/dev/null 2>&1 || true
+  ufw deny 8080/tcp >/dev/null 2>&1 || true
+  log_info "SSH-only: 3000/tcp и 8080/tcp закрыты на UFW (deny)"
+fi
+
 # ── Б14. Запуск панели ──────────────────────────────────────────────────
 next_step "Запуск панели через PM2..."
 
@@ -853,10 +896,15 @@ cd "${PANEL_DIR}/panel"
 pm2 delete "${SERVICE_NAME}" 2>/dev/null || true
 sleep 1
 
+# LISTEN_HOST: 0.0.0.0 (по умолчанию) или 127.0.0.1 (SSH-only режим).
+# Прокидываем через --update-env, чтобы PM2 запомнил env при pm2 save / restart.
+PM2_ENV_LISTEN="LISTEN_HOST=${LISTEN_HOST:-0.0.0.0}"
+LISTEN_HOST="${LISTEN_HOST:-0.0.0.0}" \
 pm2 start server/index.js \
   --name "${SERVICE_NAME}" \
   --time \
   --restart-delay=3000 \
+  --update-env \
   2>&1 | tail -3
 
 pm2 save --force >/dev/null 2>&1 || true
@@ -885,6 +933,7 @@ Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
 Environment=PORT=${INTERNAL_PORT}
+Environment=LISTEN_HOST=${LISTEN_HOST:-0.0.0.0}
 StandardOutput=journal
 StandardError=journal
 
@@ -1149,7 +1198,16 @@ echo -e "${PURPLE}${BOLD}║   ✅  Установка завершена!      
 echo -e "${PURPLE}${BOLD}╠══════════════════════════════════════════════════════════════╣${RESET}"
 echo -e "${PURPLE}${BOLD}║   🌐  ПАНЕЛЬ УПРАВЛЕНИЯ                                       ║${RESET}"
 
-if [[ "$ACCESS_MODE" == "1" ]]; then
+if [[ "$SSH_ONLY" == "1" ]]; then
+  echo -e "${PURPLE}${BOLD}║   🔒  SSH-only режим (панель не доступна из Интернета)        ║${RESET}"
+  echo -e "${PURPLE}${BOLD}║   ➜   На локальной машине выполните:                          ║${RESET}"
+  echo -e "${PURPLE}${BOLD}║       ssh -L 8080:127.0.0.1:${INTERNAL_PORT} root@${SERVER_IP}${RESET}"
+  echo -e "${PURPLE}${BOLD}║   ➜   Затем откройте: http://localhost:8080${RESET}"
+  if [[ "$ACCESS_MODE" == "3" && -n "$PANEL_DOMAIN" ]]; then
+    echo -e "${PURPLE}${BOLD}║   ℹ   Поддомен ${PANEL_DOMAIN} НЕ настроен в Caddy.           ║${RESET}"
+    echo -e "${PURPLE}${BOLD}║       Открыть публично: bash update.sh --expose ${PANEL_DOMAIN}${RESET}"
+  fi
+elif [[ "$ACCESS_MODE" == "1" ]]; then
   echo -e "${PURPLE}${BOLD}║   ➜   http://${SERVER_IP}:8080${RESET}"
 elif [[ "$ACCESS_MODE" == "3" && -n "$PANEL_DOMAIN" ]]; then
   echo -e "${PURPLE}${BOLD}║   ➜   https://${PANEL_DOMAIN}${RESET}"
