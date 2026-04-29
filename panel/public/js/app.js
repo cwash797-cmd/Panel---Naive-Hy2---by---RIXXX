@@ -108,6 +108,27 @@ function goToPage(page) {
   if (page === 'tuning') loadTuning();
   if (page === 'diag') loadDiagPorts();
   if (page === 'bypass') loadBypass();
+  if (page === 'settings') loadSettingsInfo();
+}
+
+// ─── SETTINGS — динамическая версия панели ──────────────
+async function loadSettingsInfo() {
+  const el = document.getElementById('panelVersion');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/system/version');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();
+    el.textContent = d.version || '—';
+    if (d.source === 'fallback') {
+      el.title = 'Файл /etc/rixxx-panel/version не найден — показана версия по умолчанию';
+    } else {
+      el.title = 'Из /etc/rixxx-panel/version';
+    }
+  } catch (e) {
+    el.textContent = '—';
+    el.title = 'Не удалось получить версию: ' + e.message;
+  }
 }
 
 // ─── DIAGNOSTICS ────────────────────────────────────────

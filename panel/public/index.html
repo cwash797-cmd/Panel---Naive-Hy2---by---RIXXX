@@ -627,6 +627,18 @@
         </button>
       </div>
 
+      <div class="card info-card" style="margin-bottom:18px;border-left:4px solid var(--warn, #f59e0b)">
+        <div class="card-body">
+          <h3 style="margin-top:0">⚠️ Функция в тестировании</h3>
+          <p style="color:var(--text-secondary);line-height:1.55;margin:6px 0 0 0">
+            <strong>Bypass находится в активном тестировании.</strong> Перед использованием в продакшне
+            <strong>обязательно проверьте на своём клиенте</strong>: что нужные сайты открываются напрямую,
+            а остальной трафик продолжает идти через VPN. Если что-то работает не так — откатитесь кнопкой
+            «Очистить» ниже и сообщите автору в Telegram.
+          </p>
+        </div>
+      </div>
+
       <div class="card info-card" style="margin-bottom:18px">
         <div class="card-body">
           <h3 style="margin-top:0">Зачем это нужно</h3>
@@ -774,6 +786,18 @@
             <li><strong>Проверьте ссылку</strong>: формат <code>hysteria2://PASSWORD@DOMAIN:443?sni=DOMAIN#name</code>. Для userpass-auth пароль = <code>username:password</code>.</li>
             <li><strong>Cert невалиден</strong> — клиент не принимает cert Caddy. В диагностике выше проверьте что cert-файл существует и доступен (<code>perms 644</code>).</li>
             <li><strong>Файрволл провайдера</strong> блокирует UDP/443 на стороне клиента — попробуйте мобильный интернет или VPN через другой регион.</li>
+          </ul>
+
+          <h3 class="diag-help-title" style="margin-top:20px">CLI-инструменты на сервере:</h3>
+          <ul class="diag-help-list">
+            <li><strong>Проверить состояние всей установки</strong> (версия, сервисы, TLS, порты, masquerade, режим доступа):
+              <code>bash update.sh --status</code> — работает без root, безопасно запускать в любой момент.</li>
+            <li><strong>Восстановить сломанную установку</strong> (регенерация Caddyfile и Hysteria-конфига из <code>config.json</code>,
+              авто-бэкап в <code>/etc/rixxx-panel/backups/</code>, валидация и откат при ошибке):
+              <code>sudo bash update.sh --repair</code>. Перед запуском полезно сделать
+              <code>sudo bash update.sh --repair --dry-run</code> — покажет что будет сделано без изменений.</li>
+            <li><strong>Применить накопительные патчи</strong> (без переустановки): <code>sudo bash update.sh</code>.
+              Пользователи, домены и сертификаты сохраняются.</li>
           </ul>
 
           <h3 class="diag-help-title" style="margin-top:20px">Если Hy2 вообще не запускается:</h3>

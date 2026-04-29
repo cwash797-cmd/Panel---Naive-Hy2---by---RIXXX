@@ -239,6 +239,22 @@ app.get('/api/config', requireAuth, (req, res) => {
   res.json(loadConfig());
 });
 
+// Динамическая версия панели — читается из /etc/rixxx-panel/version (обновляется update.sh).
+// Fallback: '1.0.0' если файл недоступен (например, на dev-окружении или сразу после установки).
+app.get('/api/system/version', requireAuth, (req, res) => {
+  const VERSION_FILE = '/etc/rixxx-panel/version';
+  const FALLBACK = '1.0.0';
+  try {
+    if (fs.existsSync(VERSION_FILE)) {
+      const v = fs.readFileSync(VERSION_FILE, 'utf8').trim();
+      if (v && /^\d+\.\d+\.\d+/.test(v)) {
+        return res.json({ version: v, source: 'file' });
+      }
+    }
+  } catch (_) { /* ignore — отдадим fallback */ }
+  res.json({ version: FALLBACK, source: 'fallback' });
+});
+
 function checkServiceActive(unit) {
   return new Promise((resolve) => {
     const p = spawn('systemctl', ['is-active', unit]);
