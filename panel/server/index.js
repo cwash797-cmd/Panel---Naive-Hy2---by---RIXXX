@@ -22,6 +22,11 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const PORT = process.env.PORT || 3000;
+// LISTEN_HOST: 0.0.0.0 (по умолчанию — публично) | 127.0.0.1 (SSH-only режим).
+// Управляется через Environment=LISTEN_HOST=... в systemd-юните или
+// --env LISTEN_HOST=... в PM2. Дефолт сохраняет обратную совместимость
+// со всеми существующими установками.
+const LISTEN_HOST = process.env.LISTEN_HOST || '0.0.0.0';
 const DATA_DIR = path.join(__dirname, '../data');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
@@ -1220,9 +1225,13 @@ app.get(/^(?!\/api).*/, (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, LISTEN_HOST, () => {
+  const isLocal = LISTEN_HOST === '127.0.0.1' || LISTEN_HOST === 'localhost';
   console.log(`\n╔═══════════════════════════════════════════════╗`);
   console.log(`║   Panel Naive + Hysteria2 by RIXXX            ║`);
-  console.log(`║   Running on http://0.0.0.0:${PORT}              ║`);
+  console.log(`║   Running on http://${LISTEN_HOST}:${PORT}${' '.repeat(Math.max(0, 14 - LISTEN_HOST.length))}║`);
+  if (isLocal) {
+    console.log(`║   SSH-only mode (доступ через ssh -L)         ║`);
+  }
   console.log(`╚═══════════════════════════════════════════════╝\n`);
 });
