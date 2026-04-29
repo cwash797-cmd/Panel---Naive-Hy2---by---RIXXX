@@ -302,7 +302,7 @@ migrate_masquerade_default() {
   echo ""
   log_info "${BOLD}Маскировка${RESET} теперь настраиваемая (2 варианта):"
   log_info "  ${BOLD}1)${RESET} Локальная страница «Loading» (текущий режим)"
-  log_info "  ${BOLD}2)${RESET} Зеркалирование внешнего сайта (apple.com / github.com / amd.com)"
+  log_info "  ${BOLD}2)${RESET} Зеркалирование внешнего сайта (iana.org / ietf.org / demo.nginx.com)"
   log_info "Сменить можно командой: ${BOLD}bash update.sh --masquerade${RESET}"
   echo ""
   return 0
@@ -361,7 +361,7 @@ do_masquerade() {
   echo -e "  ${CYAN}1)${RESET} Локальная страница ${BOLD}«Loading»${RESET} ${GREEN}(надёжно, без внешних зависимостей)${RESET}"
   echo -e "  ${CYAN}2)${RESET} ${BOLD}Зеркалирование${RESET} внешнего сайта (reverse_proxy)"
   echo -e "      ${RED}⚠  Если сайт станет недоступен — посетители получат 502.${RESET}"
-  echo -e "      ${YELLOW}→ Рекомендуемые: https://www.apple.com, https://github.com, https://www.amd.com${RESET}"
+  echo -e "      ${YELLOW}→ Рекомендуемые: https://www.iana.org, https://www.ietf.org, https://demo.nginx.com${RESET}"
   echo ""
   read -rp "Ваш выбор [1/2]: " _MASQ_INPUT
   _MASQ_INPUT="${_MASQ_INPUT:-1}"
@@ -369,7 +369,12 @@ do_masquerade() {
   local new_mode="local"
   local new_url=""
   if [[ "$_MASQ_INPUT" == "2" ]]; then
-    read -rp "  URL для зеркалирования (например https://www.apple.com): " new_url
+    echo ""
+    echo -e "${RED}${BOLD}⚠  ВНИМАНИЕ:${RESET} ${RED}Крупные сайты (GitHub, Apple, Cloudflare и т.д.) блокируют${RESET}"
+    echo -e "   ${RED}использование их как заглушки — клиенты NaiveProxy получат 502 / EOF.${RESET}"
+    echo -e "   ${YELLOW}Рекомендуем небольшие статичные сайты или собственный поддомен.${RESET}"
+    echo ""
+    read -rp "  URL для зеркалирования (например https://www.iana.org): " new_url
     if [[ ! "$new_url" =~ ^https?:// ]]; then
       log_err "URL должен начинаться с http:// или https://"
       return 1
@@ -398,8 +403,10 @@ do_masquerade() {
   # сразу, дополнительно дёргаем "перегенерация" через node одноразово:
   if [[ -f "$PANEL_DIR/panel/server/index.js" ]]; then
     log_info "Перегенерация Caddyfile + Hysteria config через панель..."
-    node -e "
-      process.chdir('$PANEL_DIR/panel');
+    # Запускаем node из ${PANEL_DIR}/panel — там лежит node_modules с js-yaml.
+    # Без cd Node ищет модули относительно cwd и падает с
+    # "Cannot find module 'js-yaml'" если update.sh запущен из /root/.
+    (cd "$PANEL_DIR/panel" && node -e "
       const fs=require('fs');
       const yaml=require('js-yaml');
       const cfg=JSON.parse(fs.readFileSync('$PANEL_CONFIG','utf8'));
@@ -434,7 +441,7 @@ do_masquerade() {
           console.log('Hysteria config updated.');
         }
       }
-    " || { log_err "Не удалось перегенерировать конфиги"; return 1; }
+    ") || { log_err "Не удалось перегенерировать конфиги"; return 1; }
     log_ok "Caddyfile и Hysteria config обновлены"
   fi
 
@@ -700,7 +707,10 @@ do_repair() {
   # «в lockstep» — мы не можем require() server/index.js (там app.listen на старте),
   # поэтому регенерируем через тот же подход, что и в do_masquerade(): вытаскиваем
   # cfg и перезаписываем по шаблонам.
-  node -e "
+  # Запускаем node из ${PANEL_DIR}/panel — там лежит node_modules с js-yaml.
+  # Без cd Node ищет модули относительно cwd и падает с
+  # "Cannot find module 'js-yaml'" если update.sh запущен из /root/.
+  (cd "$PANEL_DIR/panel" && node -e "
     const fs=require('fs');
     const yaml=require('js-yaml');
     const cfg=JSON.parse(fs.readFileSync('$PANEL_CONFIG','utf8'));
@@ -752,7 +762,7 @@ do_repair() {
       fs.writeFileSync('$HY2_CONFIG.new', yaml.dump(base, { lineWidth: 120, quotingType: '\"' }));
       console.log('Hysteria config generated → $HY2_CONFIG.new');
     }
-  " || { log_err "Не удалось сгенерировать конфиги"; rollback_from_backup; return 1; }
+  ") || { log_err "Не удалось сгенерировать конфиги"; rollback_from_backup; return 1; }
 
   # 3) Валидация Caddyfile.
   log_info "Шаг 3/5: валидация Caddyfile"
@@ -774,7 +784,7 @@ do_repair() {
   if [[ -f "${HY2_CONFIG}.new" ]]; then
     # YAML self-validate.
     if ! python3 -c "import yaml,sys; yaml.safe_load(open('${HY2_CONFIG}.new'))" 2>/dev/null \
-       && ! node -e "require('js-yaml').load(require('fs').readFileSync('${HY2_CONFIG}.new','utf8'))" 2>/dev/null; then
+       && ! (cd "$PANEL_DIR/panel" && node -e "require('js-yaml').load(require('fs').readFileSync('${HY2_CONFIG}.new','utf8'))") 2>/dev/null; then
       log_err "Hysteria config невалиден (YAML parse failed) — откат"
       rm -f "${HY2_CONFIG}.new"
       rollback_from_backup
