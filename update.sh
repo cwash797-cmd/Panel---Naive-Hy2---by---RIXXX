@@ -13,6 +13,11 @@
 #    --expose <domain>    восстановить публичный доступ к панели через
 #                         поддомен <domain> (Caddy + LE), вернуть LISTEN_HOST=0.0.0.0,
 #                         открыть UFW-порты. Используется после установки в SSH-only.
+#    --ssh-only           включить SSH-only режим на уже работающей установке:
+#                         удаляет panel-блок из Caddy (если был), закрывает 8080/3000
+#                         в UFW, отключает nginx, биндит панель на 127.0.0.1.
+#                         Юзеры NaiveProxy/Hy2, маскировка, сертификаты — сохраняются.
+#                         Доступ только через ssh -L 8080:127.0.0.1:3000 root@<server>.
 #    --masquerade         интерактивно сменить режим маскировки на существующей
 #                         установке (local | mirror <url>). Перегенерирует
 #                         Caddyfile и Hy2 config, перезапускает сервисы.
@@ -48,6 +53,8 @@ DRY_RUN=0
 FORCE=0
 EXPOSE_DOMAIN=""
 EXPOSE_MODE=0
+SSH_ONLY_MODE_FLAG=0
+SSH_ONLY_YES=0
 MASQUERADE_MODE_FLAG=0
 REPAIR_MODE=0
 STATUS_MODE=0
@@ -64,11 +71,13 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
+    --ssh-only)   SSH_ONLY_MODE_FLAG=1; shift ;;
+    --yes|-y)     SSH_ONLY_YES=1; shift ;;
     --masquerade) MASQUERADE_MODE_FLAG=1; shift ;;
     --repair)     REPAIR_MODE=1; shift ;;
     --status)     STATUS_MODE=1; shift ;;
     --help|-h)
-      sed -n '2,28p' "$0"
+      sed -n '2,32p' "$0"
       exit 0
       ;;
     *)
@@ -741,6 +750,286 @@ EOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────
+# Режим --ssh-only: переключить уже работающую установку в SSH-only режим.
+# ─────────────────────────────────────────────────────────────────────────
+# Симметрично --expose <domain>, но в обратную сторону. Делает:
+#   1) Читает текущее состояние из config.json (panelDomain, accessMode,
+#      stack.naive, masqueradeMode), показывает понятное предупреждение что
+#      именно изменится у пользователя, и спрашивает подтверждение.
+#   2) auto_backup "ssh-only" → точка отката (Caddyfile, Hy2 config, config.json,
+#      systemd-юнит). Возврат: bash update.sh --expose <panelDomain>.
+#   3) Если в Caddyfile есть panel-блок (по panelDomain) — удаляет его. Это нужно
+#      потому что backend writeCaddyfile() уже уважает sshOnly=1 и не будет его
+#      добавлять при следующем апдейте юзеров, но ТЕКУЩИЙ Caddyfile надо
+#      привести в соответствие СЕЙЧАС, иначе домен панели всё ещё резолвится.
+#   4) UFW deny 8080/tcp + 3000/tcp + delete allow (как в migration 1.4.0).
+#   5) systemctl stop && disable nginx если запущен (биндил 0.0.0.0:8080).
+#   6) Прописывает sshOnly=1, listenHost=127.0.0.1 в config.json.
+#      panelDomain НЕ удаляем — это позволит вернуться через --expose <тот же>.
+#   7) systemd-юнит: Environment=LISTEN_HOST=127.0.0.1 + daemon-reload.
+#   8) PM2: delete + start с явным LISTEN_HOST=127.0.0.1 PORT=3000 префиксом
+#      (урок из PR #8 — pm2 restart --update-env env не подхватывает).
+#   9) Reload Caddy (если был panel-блок) — чтобы убрать домен из активной
+#      конфигурации немедленно.
+#  10) Финальная проверка: curl http://127.0.0.1:3000 ДОЛЖЕН отвечать (это и
+#      есть точка SSH-туннеля), внешний IP НЕ должен.
+#
+# КРИТИЧНО: эта операция сохраняет:
+#   • naiveUsers / hy2Users — не трогаем
+#   • cfg.domain (домен прокси) и его TLS-сертификат — не трогаем
+#   • masqueradeMode / masqueradeUrl — не трогаем
+#   • главный site-блок Caddy (forward_proxy + masquerade) — не трогаем
+#   • Hysteria2 config — не трогаем (он не привязан к sshOnly)
+# При следующем выпуске Naive-юзеров writeCaddyfile() корректно
+# регенерирует Caddyfile БЕЗ panel-блока (сравни строку 378 в backend).
+do_ssh_only() {
+  log_step "Режим --ssh-only: переключение в SSH-only режим"
+
+  if [[ ! -f "$PANEL_CONFIG" ]]; then
+    log_err "config.json не найден: $PANEL_CONFIG"
+    log_info "Установите панель через install.sh, либо проверьте путь."
+    return 1
+  fi
+
+  # 1) Читаем текущее состояние и показываем что именно изменится.
+  local cur_state
+  cur_state="$(node -e "
+    try {
+      const c=require('$PANEL_CONFIG');
+      const out = {
+        sshOnly: c.sshOnly || 0,
+        panelDomain: c.panelDomain || '',
+        accessMode: c.accessMode || '',
+        domain: c.domain || '',
+        listenHost: c.listenHost || '0.0.0.0',
+        stackNaive: (c.stack && c.stack.naive) ? 1 : 0,
+        stackHy2:   (c.stack && c.stack.hy2)   ? 1 : 0,
+        naiveUsers: (c.naiveUsers || []).length,
+        hy2Users:   (c.hy2Users   || []).length,
+        masqueradeMode: c.masqueradeMode || ''
+      };
+      process.stdout.write(JSON.stringify(out));
+    } catch(e) { process.stdout.write('{}'); }
+  " 2>/dev/null || echo '{}')"
+
+  local CUR_SSH_ONLY CUR_PANEL_DOMAIN CUR_ACCESS_MODE CUR_DOMAIN
+  local CUR_NAIVE_USERS CUR_HY2_USERS CUR_MASQ
+  CUR_SSH_ONLY="$(echo "$cur_state"     | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(String(JSON.parse(s).sshOnly||0))}catch(e){process.stdout.write('0')}})" 2>/dev/null || echo 0)"
+  CUR_PANEL_DOMAIN="$(echo "$cur_state" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(String(JSON.parse(s).panelDomain||''))}catch(e){process.stdout.write('')}})" 2>/dev/null || echo '')"
+  CUR_ACCESS_MODE="$(echo "$cur_state"  | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(String(JSON.parse(s).accessMode||''))}catch(e){process.stdout.write('')}})" 2>/dev/null || echo '')"
+  CUR_DOMAIN="$(echo "$cur_state"       | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(String(JSON.parse(s).domain||''))}catch(e){process.stdout.write('')}})" 2>/dev/null || echo '')"
+  CUR_NAIVE_USERS="$(echo "$cur_state"  | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(String(JSON.parse(s).naiveUsers||0))}catch(e){process.stdout.write('0')}})" 2>/dev/null || echo 0)"
+  CUR_HY2_USERS="$(echo "$cur_state"    | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(String(JSON.parse(s).hy2Users||0))}catch(e){process.stdout.write('0')}})" 2>/dev/null || echo 0)"
+  CUR_MASQ="$(echo "$cur_state"         | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(String(JSON.parse(s).masqueradeMode||''))}catch(e){process.stdout.write('')}})" 2>/dev/null || echo '')"
+
+  # Если уже в SSH-only — нечего делать.
+  if [[ "$CUR_SSH_ONLY" == "1" && $FORCE -eq 0 ]]; then
+    log_skip "SSH-only режим уже включён (sshOnly=1 в config.json)"
+    log_info "Если панель всё равно публично доступна — запустите ${BOLD}bash update.sh${RESET}"
+    log_info "(применится миграция 1.4.0 которая закроет порты и пересоздаст PM2)."
+    return 0
+  fi
+
+  # Показываем текущее состояние и предупреждение про последствия.
+  echo ""
+  echo -e "${BOLD}Текущее состояние установки:${RESET}"
+  echo -e "  • Домен прокси:           ${BOLD}${CUR_DOMAIN:-—}${RESET}"
+  echo -e "  • Поддомен панели:        ${BOLD}${CUR_PANEL_DOMAIN:-—}${RESET}"
+  echo -e "  • Режим доступа:          ${BOLD}${CUR_ACCESS_MODE:-—}${RESET}"
+  echo -e "  • Юзеров NaiveProxy:      ${BOLD}${CUR_NAIVE_USERS}${RESET} ${GREEN}(сохранятся)${RESET}"
+  echo -e "  • Юзеров Hysteria2:       ${BOLD}${CUR_HY2_USERS}${RESET} ${GREEN}(сохранятся)${RESET}"
+  echo -e "  • Маскировка:             ${BOLD}${CUR_MASQ:-—}${RESET} ${GREEN}(сохранится)${RESET}"
+  echo ""
+  echo -e "${YELLOW}${BOLD}⚠  После применения --ssh-only:${RESET}"
+  if [[ -n "$CUR_PANEL_DOMAIN" ]]; then
+    echo -e "  ${YELLOW}• Панель НЕ будет доступна на https://${CUR_PANEL_DOMAIN} (panel-блок удаляется из Caddy)${RESET}"
+  fi
+  echo -e "  ${YELLOW}• Панель НЕ будет доступна на http://<server-ip>:8080 и :3000 (UFW deny)${RESET}"
+  echo -e "  ${YELLOW}• Панель доступна ТОЛЬКО через SSH-туннель:${RESET}"
+  echo -e "      ${BOLD}ssh -L 8080:127.0.0.1:3000 root@<server-ip>${RESET}"
+  echo -e "      Затем в браузере: ${BOLD}http://localhost:8080${RESET}"
+  echo ""
+  echo -e "${GREEN}${BOLD}✅ Что НЕ изменится:${RESET}"
+  echo -e "  ${GREEN}• Юзеры NaiveProxy/Hysteria2, их пароли и ссылки${RESET}"
+  echo -e "  ${GREEN}• Домен прокси ${CUR_DOMAIN:-—} и его TLS-сертификат${RESET}"
+  echo -e "  ${GREEN}• Маскировка (mirror/local) и Hysteria2 конфиг${RESET}"
+  echo -e "  ${GREEN}• panelDomain в config.json — сохраняется (можно вернуть через --expose)${RESET}"
+  echo ""
+  echo -e "${BLUE}${BOLD}↩  Откат:${RESET} ${BOLD}bash update.sh --expose ${CUR_PANEL_DOMAIN:-<panel-domain>}${RESET}"
+  echo ""
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log_info "[dry-run] Дальше выполнились бы шаги 2–10 (без подтверждения)."
+    return 0
+  fi
+
+  if [[ $SSH_ONLY_YES -ne 1 ]]; then
+    if [[ ! -t 0 ]]; then
+      log_err "Нет TTY (запуск через pipe) и не указан --yes. Прерываю."
+      log_info "Для не-интерактивного запуска: ${BOLD}bash update.sh --ssh-only --yes${RESET}"
+      return 1
+    fi
+    read -rp "Подтвердить переключение в SSH-only? [y/N]: " _CONFIRM
+    if [[ "${_CONFIRM,,}" != "y" && "${_CONFIRM,,}" != "yes" ]]; then
+      log_info "Отменено пользователем."
+      return 0
+    fi
+  fi
+
+  # 2) Бэкап.
+  auto_backup "ssh-only" || log_warn "Бэкап не создан (продолжаю — точки отката не будет)"
+
+  # 3) Удаляем panel-блок из Caddyfile (если есть panelDomain и блок присутствует).
+  local caddy_changed=0
+  if [[ -n "$CUR_PANEL_DOMAIN" && -f "$CADDYFILE" ]]; then
+    if grep -qE "^${CUR_PANEL_DOMAIN//./\\.} \{" "$CADDYFILE"; then
+      log_info "Удаляю panel-блок ${CUR_PANEL_DOMAIN} из Caddyfile..."
+      # Используем awk чтобы корректно удалить весь { ... } блок
+      # для panel-домена. file_server и forward_proxy внутри других блоков
+      # не трогаем (они на отдельных уровнях вложенности).
+      local tmp_caddy="${CADDYFILE}.ssh-only.new"
+      awk -v dom="$CUR_PANEL_DOMAIN" '
+        BEGIN { skip=0; depth=0 }
+        # Начало panel-блока: "panel.example.com {"
+        $0 ~ "^"dom" \\{" && skip==0 { skip=1; depth=1; next }
+        skip==1 {
+          # Считаем баланс { } чтобы найти конец блока.
+          n = gsub(/\{/, "{")
+          m = gsub(/\}/, "}")
+          depth += n - m
+          if (depth <= 0) { skip=0; next }
+          next
+        }
+        { print }
+      ' "$CADDYFILE" > "$tmp_caddy"
+
+      # Валидируем результат если caddy установлен.
+      if command -v caddy >/dev/null 2>&1; then
+        if caddy validate --config "$tmp_caddy" >/dev/null 2>&1; then
+          mv -f "$tmp_caddy" "$CADDYFILE"
+          caddy_changed=1
+          log_ok "panel-блок удалён из Caddyfile (валидация прошла)"
+        else
+          log_err "Новый Caddyfile невалиден — оставляю старый, откат через бэкап"
+          rm -f "$tmp_caddy" 2>/dev/null
+          rollback_from_backup
+          return 1
+        fi
+      else
+        # caddy не установлен — просто заменяем (best-effort).
+        mv -f "$tmp_caddy" "$CADDYFILE"
+        caddy_changed=1
+        log_warn "caddy не установлен — Caddyfile заменён без валидации"
+      fi
+    else
+      log_skip "panel-блок ${CUR_PANEL_DOMAIN} не найден в Caddyfile (уже удалён?)"
+    fi
+  else
+    log_skip "panelDomain не задан или Caddyfile отсутствует — пропускаю удаление panel-блока"
+  fi
+
+  # 4) UFW deny на оба порта панели.
+  if command -v ufw >/dev/null 2>&1; then
+    ufw delete allow 8080/tcp >/dev/null 2>&1 || true
+    ufw delete allow 3000/tcp >/dev/null 2>&1 || true
+    ufw deny 8080/tcp >/dev/null 2>&1 || true
+    ufw deny 3000/tcp >/dev/null 2>&1 || true
+    ufw reload >/dev/null 2>&1 || true
+    log_ok "UFW: 8080/tcp и 3000/tcp закрыты (deny), allow-правила удалены"
+  else
+    log_warn "UFW не установлен — пропускаю правила firewall"
+  fi
+
+  # 5) Останавливаем nginx если запущен.
+  if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
+    log_info "Nginx запущен (биндил 0.0.0.0:8080) — останавливаю и отключаю"
+    systemctl stop nginx >/dev/null 2>&1 || true
+    systemctl disable nginx >/dev/null 2>&1 || true
+    log_ok "Nginx остановлен и отключён"
+  else
+    log_skip "Nginx не запущен — пропускаю"
+  fi
+
+  # 6) config.json: sshOnly=1, listenHost=127.0.0.1. panelDomain НЕ удаляем —
+  # это позволяет вернуть публичный доступ через --expose <тот же домен>.
+  node -e "
+    const fs=require('fs');
+    const p='$PANEL_CONFIG';
+    const c=JSON.parse(fs.readFileSync(p,'utf8'));
+    c.sshOnly = 1;
+    c.listenHost = '127.0.0.1';
+    fs.writeFileSync(p, JSON.stringify(c, null, 2));
+  " && log_ok "config.json обновлён (sshOnly=1, listenHost=127.0.0.1, panelDomain сохранён)"
+
+  # 7) systemd-юнит: Environment=LISTEN_HOST=127.0.0.1.
+  local SVC="/etc/systemd/system/panel-naive-hy2.service"
+  if [[ -f "$SVC" ]]; then
+    if grep -q "Environment=LISTEN_HOST=" "$SVC"; then
+      sed -i 's|Environment=LISTEN_HOST=.*|Environment=LISTEN_HOST=127.0.0.1|' "$SVC"
+    else
+      sed -i '/^\[Service\]/a Environment=LISTEN_HOST=127.0.0.1' "$SVC"
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    log_ok "systemd-юнит: LISTEN_HOST=127.0.0.1"
+  fi
+
+  # 8) PM2: delete + start с явным env (урок из PR #8).
+  if command -v pm2 >/dev/null 2>&1 && pm2 describe "$PANEL_SERVICE_NAME" >/dev/null 2>&1; then
+    log_info "PM2: пересоздаю процесс панели с LISTEN_HOST=127.0.0.1..."
+    pm2 delete "$PANEL_SERVICE_NAME" >/dev/null 2>&1 || true
+    sleep 1
+    if [[ -d "$PANEL_DIR/panel" ]]; then
+      (cd "$PANEL_DIR/panel" && \
+        LISTEN_HOST=127.0.0.1 PORT=3000 pm2 start server/index.js \
+          --name "$PANEL_SERVICE_NAME" --time --update-env >/dev/null 2>&1) || true
+      pm2 save --force >/dev/null 2>&1 || true
+      log_ok "PM2: панель перезапущена"
+    fi
+  elif systemctl is-active --quiet "$PANEL_SERVICE_NAME" 2>/dev/null; then
+    systemctl restart "$PANEL_SERVICE_NAME" >/dev/null 2>&1 || true
+    log_ok "systemd: панель перезапущена"
+  fi
+
+  # 9) Reload Caddy (если меняли Caddyfile).
+  if [[ $caddy_changed -eq 1 ]]; then
+    systemctl reload caddy >/dev/null 2>&1 \
+      || systemctl restart caddy >/dev/null 2>&1 \
+      || log_warn "Не удалось reload caddy — проверьте: systemctl status caddy"
+    log_ok "Caddy reload: panel-блок убран из активной конфигурации"
+  fi
+
+  # 10) Финальная проверка: панель ДОЛЖНА отвечать на 127.0.0.1:3000.
+  sleep 2
+  local local_ok=0
+  for i in 1 2 3 4 5; do
+    if curl -fsS --max-time 3 "http://127.0.0.1:3000/" >/dev/null 2>&1 \
+       || curl -fsS --max-time 3 "http://127.0.0.1:3000/login" >/dev/null 2>&1; then
+      local_ok=1; break
+    fi
+    sleep 1
+  done
+
+  if [[ $local_ok -eq 1 ]]; then
+    log_ok "Панель отвечает на http://127.0.0.1:3000 — SSH-туннель будет работать"
+  else
+    log_err "Панель НЕ отвечает на http://127.0.0.1:3000! Откат:"
+    log_info "  bash update.sh --expose ${CUR_PANEL_DOMAIN:-<panel-domain>}"
+    log_info "  Или восстановите из бэкапа: ${BACKUP_DIR:-/etc/rixxx-panel/backups/}"
+    return 1
+  fi
+
+  echo ""
+  log_ok "${BOLD}SSH-only режим включён.${RESET} Как зайти в панель:"
+  log_info "  ${BOLD}1)${RESET} С твоего ПК:  ${BOLD}ssh -L 8080:127.0.0.1:3000 root@<server-ip>${RESET}"
+  log_info "  ${BOLD}2)${RESET} В браузере:  ${BOLD}http://localhost:8080${RESET}  ${YELLOW}(именно localhost!)${RESET}"
+  log_info "  Если порт 8080 на ПК занят — используй другой: ssh -L 18080:127.0.0.1:3000 ..."
+  log_info ""
+  log_info "↩  Вернуть публичный доступ: ${BOLD}bash update.sh --expose ${CUR_PANEL_DOMAIN:-<panel-domain>}${RESET}"
+  echo ""
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────
 # Утилита: auto_backup <tag>
 # ─────────────────────────────────────────────────────────────────────────
 # Делает снимок ключевых файлов в /etc/rixxx-panel/backups/YYYY-MM-DD-HHMMSS-<tag>/.
@@ -1156,6 +1445,16 @@ migration_registry
 # не привязанная к версии. После выполнения скрипт завершается с кодом 0.
 if [[ $EXPOSE_MODE -eq 1 ]]; then
   if do_expose; then
+    exit 0
+  else
+    exit 1
+  fi
+fi
+
+# ── 5b'. Режим --ssh-only: переключение в SSH-only на работающей установке ──
+# Симметрично --expose, разовая операция. После выполнения exit 0.
+if [[ $SSH_ONLY_MODE_FLAG -eq 1 ]]; then
+  if do_ssh_only; then
     exit 0
   else
     exit 1
