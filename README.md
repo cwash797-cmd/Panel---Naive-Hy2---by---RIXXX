@@ -367,6 +367,11 @@ sudo bash update.sh --repair
 
 ## 📜 История изменений
 
+### v1.4.0 — Hotfix: SSH-only режим (PR #7)
+- 🔒 **Закрыта дыра в SSH-only режиме**: при `ACCESS_MODE=1 + SSH_ONLY=1` финальный UFW-блок в `install.sh` перетирал ранний `deny` командой `ufw allow 8080/tcp`, а Nginx биндился на `0.0.0.0:8080` — панель оставалась доступной из Интернета, несмотря на `LISTEN_HOST=127.0.0.1` у бэкенда. Теперь `SSH_ONLY=1` принудительно переводит установку в режим прямого bind на `127.0.0.1:${INTERNAL_PORT}` (без Nginx), а финальный UFW-блок проверяет `SSH_ONLY` первым приоритетом и наглухо закрывает 8080/tcp + 3000/tcp.
+- 🔧 **Migration 1.4.0** (`migrate_ssh_only_close_ports`) — для уже установленных серверов с `sshOnly=1`: автоматически закрывает 8080/tcp и 3000/tcp в UFW (и удаляет старые `allow`-правила), останавливает и отключает `nginx`, гарантирует `LISTEN_HOST=127.0.0.1` в systemd-юните и PM2-env, перезапускает панель и финально проверяет, что внешний IP не отвечает на этих портах. Применяется одной командой: `bash <(curl -fsSL https://raw.githubusercontent.com/cwash797-cmd/Panel---Naive-Hy2---by---RIXXX/main/update.sh)`.
+- ✅ **Контракт миграции**: если `sshOnly=0` — миграция no-op (легитимный публичный режим `ACCESS_MODE=1` через Nginx-прокси не ломается).
+
 ### v1.3.2 — Hotfix: masquerade (PR #6)
 - 🐞 **`update.sh --masquerade` падал с `Cannot find module 'js-yaml'`**: Node-скрипт запускался из `/root/`, где нет `node_modules`. Теперь все три Node-вызова в `update.sh` (`do_masquerade()`, `do_repair()`, YAML-валидация в atomic write) обёрнуты в `(cd "$PANEL_DIR/panel" && node -e "...")` — модули резолвятся корректно.
 - 🐞 **Mirror на крупных сайтах (GitHub, Apple, Cloudflare и т.д.) не работал**: они блокируют `reverse_proxy`-запросы от чужих серверов, клиенты NaiveProxy получали `502 / EOF`. В рекомендациях `install.sh` и `update.sh --masquerade` заменены примеры на статичные сайты: `iana.org`, `ietf.org`, `demo.nginx.com`. Дефолт при пустом вводе теперь `https://www.iana.org`.
