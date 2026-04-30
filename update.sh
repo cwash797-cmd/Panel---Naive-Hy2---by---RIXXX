@@ -409,37 +409,74 @@ migrate_ssh_only_close_ports() {
     log_ok "systemd-юнит: LISTEN_HOST=127.0.0.1"
   fi
 
-  # 4) Обновляем PM2 env (если PM2 управляет панелью) и перезапускаем.
+  # 4) Перезапускаем панель с явным LISTEN_HOST=127.0.0.1.
+  #    КРИТИЧНО: pm2 restart --update-env НЕ всегда подхватывает новый env,
+  #    если процесс был запущен без него (или был запущен через ecosystem-файл).
+  #    Делаем delete + start с префиксом env — это единственный надёжный способ.
+  local restart_ok=0
   if command -v pm2 >/dev/null 2>&1 && pm2 describe panel-naive-hy2 >/dev/null 2>&1; then
-    LISTEN_HOST=127.0.0.1 pm2 restart panel-naive-hy2 --update-env >/dev/null 2>&1 || true
-    pm2 save --force >/dev/null 2>&1 || true
-    log_ok "PM2: панель перезапущена с LISTEN_HOST=127.0.0.1"
+    log_info "PM2: пересоздаю процесс панели с LISTEN_HOST=127.0.0.1..."
+    pm2 delete panel-naive-hy2 >/dev/null 2>&1 || true
+    sleep 1
+    if [[ -d "$PANEL_DIR/panel" ]]; then
+      (cd "$PANEL_DIR/panel" && \
+        LISTEN_HOST=127.0.0.1 PORT=3000 pm2 start server/index.js \
+          --name panel-naive-hy2 --time --update-env >/dev/null 2>&1) || true
+      pm2 save --force >/dev/null 2>&1 || true
+      log_ok "PM2: панель перезапущена с LISTEN_HOST=127.0.0.1"
+      restart_ok=1
+    else
+      log_err "Не найден $PANEL_DIR/panel — не могу запустить панель"
+    fi
   elif systemctl is-active --quiet panel-naive-hy2 2>/dev/null; then
     systemctl restart panel-naive-hy2 >/dev/null 2>&1 || true
     log_ok "systemd: панель перезапущена"
+    restart_ok=1
   fi
 
-  # 5) Финальная самопроверка: панель не должна отвечать на внешнем интерфейсе.
-  sleep 1
+  # 5) Финальная самопроверка: главное — панель ДОЛЖНА отвечать на 127.0.0.1:3000
+  #    (это и есть точка, к которой подключается SSH-туннель). Если не отвечает —
+  #    туннель работать не будет, и пользователь не попадёт в админку.
+  sleep 2
+  log_info "Проверка что панель доступна локально (для SSH-туннеля)..."
+  local local_ok=0
+  for i in 1 2 3 4 5; do
+    if curl -fsS --max-time 3 "http://127.0.0.1:3000/" >/dev/null 2>&1 \
+       || curl -fsS --max-time 3 "http://127.0.0.1:3000/login" >/dev/null 2>&1; then
+      local_ok=1
+      break
+    fi
+    sleep 1
+  done
+
+  if [[ $local_ok -eq 1 ]]; then
+    log_ok "Панель отвечает на http://127.0.0.1:3000 — SSH-туннель будет работать"
+  else
+    log_err "Панель НЕ отвечает на http://127.0.0.1:3000! SSH-туннель НЕ заработает."
+    log_info "Диагностика: pm2 logs panel-naive-hy2 --nostream --lines 30"
+    log_info "Ручной запуск:"
+    log_info "  cd $PANEL_DIR/panel && pm2 delete panel-naive-hy2"
+    log_info "  LISTEN_HOST=127.0.0.1 PORT=3000 pm2 start server/index.js \\"
+    log_info "    --name panel-naive-hy2 --time --update-env"
+  fi
+
+  # 6) Дополнительная проверка — внешний IP не должен отвечать (это и есть фикс).
   local ext_ip
   ext_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
   if [[ -n "$ext_ip" ]]; then
     if curl -fsS --max-time 3 "http://${ext_ip}:8080/" >/dev/null 2>&1; then
       log_warn "ВНИМАНИЕ: панель всё ещё отвечает на http://${ext_ip}:8080 — проверьте вручную"
-    else
-      log_ok "Панель не отвечает на http://${ext_ip}:8080 (как и ожидалось)"
     fi
     if curl -fsS --max-time 3 "http://${ext_ip}:3000/" >/dev/null 2>&1; then
       log_warn "ВНИМАНИЕ: панель всё ещё отвечает на http://${ext_ip}:3000 — проверьте вручную"
-    else
-      log_ok "Панель не отвечает на http://${ext_ip}:3000 (как и ожидалось)"
     fi
   fi
 
   echo ""
-  log_info "${BOLD}SSH-only hotfix применён.${RESET} Доступ к панели — только через SSH-туннель:"
-  log_info "  ${BOLD}ssh -L 8080:127.0.0.1:3000 root@<server-ip>${RESET}"
-  log_info "  Затем: ${BOLD}http://localhost:8080${RESET}"
+  log_info "${BOLD}SSH-only hotfix применён.${RESET} Как зайти в панель:"
+  log_info "  ${BOLD}1)${RESET} С твоего ПК:  ${BOLD}ssh -L 8080:127.0.0.1:3000 root@<server-ip>${RESET}"
+  log_info "  ${BOLD}2)${RESET} В браузере:  ${BOLD}http://localhost:8080${RESET}  ${YELLOW}(именно localhost, НЕ публичный IP!)${RESET}"
+  log_info "  Если порт 8080 на ПК занят — используй другой: ssh -L 18080:127.0.0.1:3000 ..."
   echo ""
   return 0
 }
