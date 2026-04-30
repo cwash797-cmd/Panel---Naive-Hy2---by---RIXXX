@@ -31,7 +31,7 @@ export DEBIAN_FRONTEND=noninteractive
 # ── Версия, до которой довести систему этим запуском ────────────────────
 # При добавлении новой миграции — увеличиваем TARGET_VERSION и регистрируем
 # функцию в migration_registry().
-TARGET_VERSION="1.3.0"
+TARGET_VERSION="1.4.0"
 
 # ── Пути ────────────────────────────────────────────────────────────────
 PANEL_DIR="/opt/panel-naive-hy2"
@@ -211,6 +211,8 @@ migration_registry() {
   register_migration "1.2.0" migrate_masquerade_default
   # PR #4: Repair/status/autobackup/atomic-write — каркас, без data-миграции.
   register_migration "1.3.0" migrate_repair_infra
+  # PR #7: SSH-only hotfix — закрыть 8080/3000 в UFW, остановить nginx.
+  register_migration "1.4.0" migrate_ssh_only_close_ports
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -332,6 +334,112 @@ migrate_repair_infra() {
   log_info "  ${BOLD}•${RESET} Атомарная запись Caddyfile/Hy2 config в backend (защита panel-блока)"
   log_info "  ${BOLD}•${RESET} Smoke-test в конце install.sh (caddy validate + curl-проверки)"
   log_info "  Бэкапы хранятся в: ${VERSION_DIR}/backups/ (последние 10)"
+  echo ""
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Миграция 1.4.0: SSH-only hotfix — закрыть 8080/3000, выключить nginx
+# ─────────────────────────────────────────────────────────────────────────
+# Что делает (только для установок с sshOnly=1 в config.json):
+#   • UFW deny 8080/tcp и ${INTERNAL_PORT}/tcp (закрывает протёкшие allow,
+#     которые могли остаться от прошлой логики install.sh).
+#   • Останавливает и отключает nginx, если он запущен (он биндился на
+#     0.0.0.0:8080 и проксировал на 127.0.0.1:3000 — это и было дырой).
+#   • Гарантирует LISTEN_HOST=127.0.0.1 в systemd-юните и PM2 env.
+#   • Перезапускает только панель.
+#
+# Контракт: если sshOnly=0 — миграция no-op, ничего не трогает. Это важно,
+# потому что ACCESS_MODE=1 (Nginx-прокси) — это легитимный публичный режим
+# и закрывать 8080 у него нельзя.
+migrate_ssh_only_close_ports() {
+  if [[ ! -f "$PANEL_CONFIG" ]]; then
+    log_warn "config.json не найден — пропускаю миграцию 1.4.0"
+    return 0
+  fi
+
+  local ssh_only
+  ssh_only=$(node -e "
+    try {
+      const c=JSON.parse(require('fs').readFileSync('$PANEL_CONFIG','utf8'));
+      process.stdout.write(String(c.sshOnly || 0));
+    } catch(e) { process.stdout.write('0'); }
+  " 2>/dev/null || echo "0")
+
+  if [[ "$ssh_only" != "1" ]]; then
+    log_skip "SSH-only не включён (sshOnly=${ssh_only}) — миграция 1.4.0 пропущена"
+    return 0
+  fi
+
+  log_info "${BOLD}SSH-only hotfix (PR #7):${RESET} закрываю порты панели от Интернета..."
+
+  # 1) UFW deny на оба возможных публичных порта панели.
+  if command -v ufw >/dev/null 2>&1; then
+    ufw deny 8080/tcp >/dev/null 2>&1 || true
+    ufw deny 3000/tcp >/dev/null 2>&1 || true
+    # Удаляем устаревшие allow-правила (если они были в прошлой инсталляции).
+    ufw delete allow 8080/tcp >/dev/null 2>&1 || true
+    ufw delete allow 3000/tcp >/dev/null 2>&1 || true
+    ufw reload >/dev/null 2>&1 || true
+    log_ok "UFW: 8080/tcp и 3000/tcp закрыты (deny), allow-правила удалены"
+  else
+    log_warn "UFW не установлен — пропускаю правила firewall"
+  fi
+
+  # 2) Останавливаем и отключаем nginx, если он запущен (это и была дыра:
+  # nginx слушал 0.0.0.0:8080 и проксировал на 127.0.0.1:3000).
+  if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
+    log_info "Nginx запущен и слушает 0.0.0.0:8080 — отключаю (SSH-only режим)"
+    systemctl stop nginx >/dev/null 2>&1 || true
+    systemctl disable nginx >/dev/null 2>&1 || true
+    log_ok "Nginx остановлен и отключён"
+  else
+    log_skip "Nginx не запущен — пропускаю"
+  fi
+
+  # 3) Гарантируем LISTEN_HOST=127.0.0.1 в systemd-юните (если он есть).
+  local SVC="/etc/systemd/system/panel-naive-hy2.service"
+  if [[ -f "$SVC" ]]; then
+    if grep -q "Environment=LISTEN_HOST=" "$SVC"; then
+      sed -i 's|Environment=LISTEN_HOST=.*|Environment=LISTEN_HOST=127.0.0.1|' "$SVC"
+    else
+      sed -i '/^\[Service\]/a Environment=LISTEN_HOST=127.0.0.1' "$SVC"
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    log_ok "systemd-юнит: LISTEN_HOST=127.0.0.1"
+  fi
+
+  # 4) Обновляем PM2 env (если PM2 управляет панелью) и перезапускаем.
+  if command -v pm2 >/dev/null 2>&1 && pm2 describe panel-naive-hy2 >/dev/null 2>&1; then
+    LISTEN_HOST=127.0.0.1 pm2 restart panel-naive-hy2 --update-env >/dev/null 2>&1 || true
+    pm2 save --force >/dev/null 2>&1 || true
+    log_ok "PM2: панель перезапущена с LISTEN_HOST=127.0.0.1"
+  elif systemctl is-active --quiet panel-naive-hy2 2>/dev/null; then
+    systemctl restart panel-naive-hy2 >/dev/null 2>&1 || true
+    log_ok "systemd: панель перезапущена"
+  fi
+
+  # 5) Финальная самопроверка: панель не должна отвечать на внешнем интерфейсе.
+  sleep 1
+  local ext_ip
+  ext_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  if [[ -n "$ext_ip" ]]; then
+    if curl -fsS --max-time 3 "http://${ext_ip}:8080/" >/dev/null 2>&1; then
+      log_warn "ВНИМАНИЕ: панель всё ещё отвечает на http://${ext_ip}:8080 — проверьте вручную"
+    else
+      log_ok "Панель не отвечает на http://${ext_ip}:8080 (как и ожидалось)"
+    fi
+    if curl -fsS --max-time 3 "http://${ext_ip}:3000/" >/dev/null 2>&1; then
+      log_warn "ВНИМАНИЕ: панель всё ещё отвечает на http://${ext_ip}:3000 — проверьте вручную"
+    else
+      log_ok "Панель не отвечает на http://${ext_ip}:3000 (как и ожидалось)"
+    fi
+  fi
+
+  echo ""
+  log_info "${BOLD}SSH-only hotfix применён.${RESET} Доступ к панели — только через SSH-туннель:"
+  log_info "  ${BOLD}ssh -L 8080:127.0.0.1:3000 root@<server-ip>${RESET}"
+  log_info "  Затем: ${BOLD}http://localhost:8080${RESET}"
   echo ""
   return 0
 }

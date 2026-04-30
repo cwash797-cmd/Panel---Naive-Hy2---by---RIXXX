@@ -164,6 +164,14 @@ if [[ "${_SSH_ONLY,,}" == "y" || "${_SSH_ONLY,,}" == "yes" ]]; then
   SSH_ONLY="1"
   LISTEN_HOST="127.0.0.1"
   log_info "SSH-only режим включён: панель будет слушать только на 127.0.0.1"
+  # SSH-only несовместим с Nginx-прокси на 8080: nginx бы биндился на 0.0.0.0
+  # и UFW-allow открыл бы порт наружу. Принудительно переключаем на прямой
+  # bind на 127.0.0.1:3000 (доступен только локально / через SSH-туннель).
+  if [[ "$ACCESS_MODE" == "1" ]]; then
+    log_info "SSH-only + Nginx(8080) несовместимы — Nginx пропускаем,"
+    log_info "панель будет слушать только на 127.0.0.1:${INTERNAL_PORT:-3000}."
+    ACCESS_MODE="2"
+  fi
   if [[ "$ACCESS_MODE" == "3" ]]; then
     echo ""
     echo -e "${YELLOW}  ⚠  ACCESS_MODE=3 + SSH-only:${RESET}"
@@ -1171,7 +1179,14 @@ fi
 # ── Б15. UFW для порта панели (финал — после Nginx) ─────────────────────
 # Только сейчас мы знаем финальный ACCESS_MODE (мог смениться при провале Nginx)
 log_info "UFW: открываю порт панели согласно режиму доступа..."
-if [[ "$ACCESS_MODE" == "1" ]]; then
+if [[ "$SSH_ONLY" == "1" ]]; then
+  # SSH-only имеет наивысший приоритет: оба порта панели наглухо закрыты,
+  # nginx (если ставился) уже остановлен/не настроен. Доступ только через
+  # ssh -L 8080:127.0.0.1:${INTERNAL_PORT}.
+  ufw deny 8080/tcp >/dev/null 2>&1 || true
+  ufw deny ${INTERNAL_PORT}/tcp >/dev/null 2>&1 || true
+  log_ok "UFW (SSH-only): 8080/tcp и ${INTERNAL_PORT}/tcp закрыты (deny)"
+elif [[ "$ACCESS_MODE" == "1" ]]; then
   # Nginx успешно настроен на 8080 → открываем 8080, закрываем 3000
   ufw allow 8080/tcp >/dev/null 2>&1 || true
   ufw deny  ${INTERNAL_PORT}/tcp >/dev/null 2>&1 || true
